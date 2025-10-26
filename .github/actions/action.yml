@@ -343,33 +343,43 @@ runs:
         set -euo pipefail
         echo "::group::Apply SUSFS patches"
         cd "$CONFIG/kernel_platform"
-        echo "Applying SUSFS patches..."
+        
+        echo "Cloning SUSFS repository..."
+        git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "${{ env.SUSFS_KERNEL_BRANCH }}" --depth=1
+        
+        echo "Copying SUSFS files..."
         cp ../../susfs4ksu/kernel_patches/50_add_susfs_in_${{ env.SUSFS_KERNEL_BRANCH }}.patch ./common/
-        cp ../../susfs4ksu/kernel_patches/fs/* ./common/fs/
-        cp ../../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+        cp -r ../../susfs4ksu/kernel_patches/fs/* ./common/fs/
+        cp -r ../../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
 
         cd ./common
+        
+        # Get SUSFS version
         susfs_version=$(grep '#define SUSFS_VERSION' ./include/linux/susfs.h | awk -F'"' '{print $2}')
         echo "SUSVER=$susfs_version" >> $GITHUB_ENV
 
         GKI_V="${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}"
         SUBLEVEL=$(grep '^SUBLEVEL *=' Makefile | head -n1 | cut -d= -f2 | tr -d ' ')
 
-        if [ "$GKI_V" == "android13-5.15" ] && [ "$SUBLEVEL" -lt 123 ]; then
+        # Fix legacy 5.15 issues
+        if [ "$GKI_V" = "android13-5.15" ] && [ "$SUBLEVEL" -lt 123 ]; then
           echo "Fixing legacy 5.15 issues..."
           curl -Lo fix_5.15.legacy.patch --retry 5 --retry-delay 2 --retry-connrefused \
             https://raw.githubusercontent.com/Numbersf/Action-Build/SukiSU-Ultra/patches/fix_5.15.legacy
           patch -p1 < fix_5.15.legacy.patch
         fi
 
+        # Apply fake patches for specific kernels
         fake_patched=0
         if [ "$GKI_V" = "android15-6.6" ]; then
           if ! grep -qxF $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' ./fs/proc/task_mmu.c; then
             echo "Applying fake patch for android15-6.6"
-            sed -i -e '/int ret = 0, copied = 0;/a \\tunsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;' -e '/int ret = 0, copied = 0;/a \\tpagemap_entry_t \*res = NULL;' ./fs/proc/task_mmu.c
+            sed -i -e '/int ret = 0, copied = 0;/a \\tunsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;' \
+                   -e '/int ret = 0, copied = 0;/a \\tpagemap_entry_t \*res = NULL;' ./fs/proc/task_mmu.c
             fake_patched=1
           fi
         fi
+        
         if [ "$GKI_V" = "android12-5.10" ] || [ "$GKI_V" = "android13-5.15" ]; then
           if ! grep -qxF $'\tif (!vma_pages(vma))' ./fs/proc/task_mmu.c; then
             echo "Applying fake patch for $GKI_V"
@@ -377,13 +387,16 @@ runs:
           fi
         fi
 
+        # Apply main SUSFS patch
         echo "Applying SUSFS patch..."
         patch -p1 < 50_add_susfs_in_${{ env.SUSFS_KERNEL_BRANCH }}.patch || true
 
+        # Revert fake patches
         if [ "$fake_patched" = 1 ]; then
           if [ "$GKI_V" = "android15-6.6" ]; then
             if grep -qxF $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' ./fs/proc/task_mmu.c; then
-              sed -i -e '/unsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;/d' -e '/pagemap_entry_t \*res = NULL;/d' ./fs/proc/task_mmu.c
+              sed -i -e '/unsigned int nr_subpages \= __PAGE_SIZE \/ PAGE_SIZE;/d' \
+                     -e '/pagemap_entry_t \*res = NULL;/d' ./fs/proc/task_mmu.c
             fi
           fi
           if [ "$GKI_V" = "android12-5.10" ] || [ "$GKI_V" = "android13-5.15" ]; then
@@ -393,6 +406,7 @@ runs:
           fi
         fi
 
+        # Apply ptrace patch for kernels < 5.16
         KERNEL_VERSION="${{ env.KERNEL_VER }}"
         MIN_VERSION="5.16"
         if [ "$(printf '%s\n' "$KERNEL_VERSION" "$MIN_VERSION" | sort -V | head -n1)" = "$KERNEL_VERSION" ]; then
@@ -405,18 +419,6 @@ runs:
           fi
         fi
 
-        if [ "$OP_HMBIRD" = "true" ]; then
-          echo "Patching HMBIRD..."
-          echo 'obj-y += hmbird_patch.o' >> ./drivers/Makefile
-          wget -O hmbird_kernel_patch.patch \
-            https://raw.githubusercontent.com/Numbersf/Action-Build/SukiSU-Ultra/patches/hmbird_kernel_patch.patch
-          patch -p1 -F 3 < hmbird_kernel_patch.patch
-          cd ./kernel/sched
-          rm -rf ext.c ext.h build_policy.c slim.h slim_sysctl.c
-          wget -O hmbird_files_patch.patch \
-            https://raw.githubusercontent.com/Numbersf/Action-Build/SukiSU-Ultra/patches/hmbird_files_patch.patch
-          patch -p1 -F 3 < hmbird_files_patch.patch
-        fi
         echo "✅ SUSFS patches applied: $susfs_version"
         echo "::endgroup::"
 
@@ -442,29 +444,47 @@ runs:
         echo "✅ Hide stuff patches applied"
         echo "::endgroup::"
 
-    - name: Apply Convert HMBIRD_OGKI to HMBIRD_GKI (for 6.6 kernels)
+    - name: Apply HMBIRD Patch (6.6 kernels)
       if: ${{ env.KERNEL_VER == '6.6' }}
       shell: bash
       run: |
-        echo "::group::Apply HMBIRD GKI conversion"
+        set -euo pipefail
+        echo "::group::Apply HMBIRD patch"
         cd "$CONFIG/kernel_platform/common"
-        sed -i '1iobj-y += hmbird_patch.o' drivers/Makefile
-        wget https://github.com/Numbersf/Action-Build/raw/SukiSU-Ultra/patches/hmbird_patch.patch
-        echo "Applying OGKI to GKI conversion patch for 6.6..."
-        patch -p1 -F 3 < hmbird_patch.patch
-        echo "✅ HMBIRD GKI conversion applied"
+        
+        echo "Downloading HMBIRD patch..."
+        if curl -fsSL -o hmbird_patch.patch \
+          "https://raw.githubusercontent.com/Numbersf/Action-Build/SukiSU-Ultra/patches/hmbird_patch.patch"; then
+          
+          # Add to Makefile if not already present
+          if ! grep -q 'hmbird_patch.o' drivers/Makefile; then
+            echo 'obj-y += hmbird_patch.o' >> drivers/Makefile
+          fi
+          
+          echo "Applying HMBIRD patch..."
+          patch -p1 -F 3 < hmbird_patch.patch || true
+          
+          echo "✅ HMBIRD patch applied"
+        else
+          echo "⚠️ HMBIRD patch not available, skipping..."
+        fi
         echo "::endgroup::"
 
-    - name: Apply SCHED_EXT (for 6.6 kernels)
+    - name: Apply SCHED_EXT (6.6 kernels)
       if: ${{ env.KERNEL_VER == '6.6' }}
       shell: bash
       run: |
+        set -euo pipefail
         echo "::group::Apply SCHED_EXT"
         cd "$CONFIG/kernel_platform/common"
-        echo "Applying SCHED_EXT for kernel 6.6..."
+        
+        echo "Cloning SCHED_EXT repository..."
         git clone --depth=1 https://github.com/HanKuCha/sched_ext.git
-        cp -r ./sched_ext/* ./kernel/sched
+        
+        echo "Copying SCHED_EXT files..."
+        cp -r ./sched_ext/* ./kernel/sched/
         rm -rf ./sched_ext/.git
+        
         echo "✅ SCHED_EXT applied"
         echo "::endgroup::"
 
@@ -605,6 +625,7 @@ runs:
           echo "CONFIG_BBG=y" >> "$CONFIG_FILE"
         fi
         
+        # Add SCHED_EXT config for 6.6 kernels
         if [ "${{ env.KERNEL_VER }}" = "6.6" ]; then
           echo "CONFIG_SCHED_CLASS_EXT=y" >> "$CONFIG_FILE"
         fi
@@ -620,7 +641,7 @@ runs:
         KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
         cd "$KERNEL_PATH/common"
         mkdir -p out
-        CUSTOM_LOCALVERSION="-${ANDROID_VER}-OP-SukiSU"
+        CUSTOM_LOCALVERSION="-${ANDROID_VER}-OP-UltraBolt"
         echo "CUSTOM_LOCALVERSION=$CUSTOM_LOCALVERSION" >> "$GITHUB_ENV"
 
     - name: Detect Clang (toolchain for build)
