@@ -157,6 +157,7 @@ jobs:
           fetch-depth: 1
 
       - name: Build Kernel
+        id: build
         uses: ./.github/actions
         with:
           op_config_json: ${{ toJSON(matrix) }}
@@ -166,6 +167,30 @@ jobs:
           enable_zram: ${{ inputs.enable_zram }}
           optimize_level: ${{ inputs.optimize_level }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Display Build Summary
+        shell: bash
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## Build Results for ${{ matrix.model }}
+          
+          - **Kernel Version**: ${{ steps.build.outputs.kernel_version }}
+          - **SukiSU Version**: ${{ steps.build.outputs.sukisu_version }}
+          - **SUSFS Version**: ${{ steps.build.outputs.susfs_version }}
+          - **Image SHA256**: \`${{ steps.build.outputs.image_sha256 }}\`
+          - **Warnings**: ${{ steps.build.outputs.warnings }}
+          - **Package**: \`${{ steps.build.outputs.zip_name }}\`
+          EOF
+
+      - name: Upload Kernel Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ matrix.model }}-${{ matrix.android_version }}-${{ matrix.kernel_version }}
+          path: |
+            ${{ matrix.model }}/artifacts/*.zip
+            ${{ matrix.model }}/artifacts/*.txt
+          retention-days: 7
+          if-no-files-found: error
 
   trigger-release:
     needs: [build]
@@ -221,10 +246,10 @@ jobs:
           |-------|----------------|
           EOF
           
-          for file in $(find downloaded-artifacts -name "*.txt" -type f | sort); do
+          find downloaded-artifacts -name "*.txt" -type f | sort | while read -r file; do
             if [ -f "$file" ]; then
               model=$(basename "$file" .txt)
-              version=$(cat "$file")
+              version=$(cat "$file" | tr -d '\n\r')
               printf "| %-12s | %-16s |\n" "$model" "$version" >> release_notes.md
             fi
           done
@@ -259,9 +284,21 @@ jobs:
 
       - name: Upload Release Assets Dynamically
         run: |
+          uploaded=0
           for file in ./downloaded-artifacts/*/*.zip; do
             if [ -f "$file" ]; then
               echo "Uploading $file..."
-              gh release upload "${{ env.NEW_TAG }}" "$file" --clobber
+              if gh release upload "${{ env.NEW_TAG }}" "$file" --clobber; then
+                ((uploaded++))
+              else
+                echo "⚠️ Failed to upload $file"
+              fi
             fi
           done
+          
+          if [ $uploaded -eq 0 ]; then
+            echo "::error::No ZIP files were uploaded!"
+            exit 1
+          fi
+          
+          echo "✅ Successfully uploaded $uploaded file(s)"
