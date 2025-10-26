@@ -115,7 +115,7 @@ runs:
         sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
           git curl ca-certificates build-essential clang lld flex bison \
           libelf-dev libssl-dev libncurses-dev zlib1g-dev liblz4-tool \
-          libxml2-utils rsync unzip dwarves file python3 ccache
+          libxml2-utils rsync unzip dwarves file python3 ccache jq
         sudo apt-get clean
         echo "::endgroup::"
 
@@ -222,41 +222,13 @@ runs:
         
         echo "Using AnyKernel3 branch: $ANYKERNEL_BRANCH"
         echo "Using SUSFS branch: $SUSFS_BRANCH"
-        git clone --depth=1 https://github.com/Numbersf/AnyKernel3.git -b "$ANYKERNEL_BRANCH"
+        git clone --depth=1 https://github.com/Bouteillepleine/AnyKernel3.git -b "$ANYKERNEL_BRANCH"
         git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "$SUSFS_BRANCH"
         git clone https://github.com/ShirkNeko/SukiSU_patch.git
         cd susfs4ksu
         SUSFS_COMMIT_SHA=$(git rev-parse HEAD)
         echo "SUSFS_COMMIT_SHA=$SUSFS_COMMIT_SHA" >> $GITHUB_ENV
-
-    - name: Download SUSFS Module
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "Downloading SUSFS module..."
-        cd "$GITHUB_WORKSPACE/AnyKernel3"
-        
-        # Get latest release from ksu_module_susfs
-        LATEST_RELEASE=$(curl -s https://api.github.com/repos/sidex15/ksu_module_susfs/releases/latest)
-        MODULE_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | endswith(".zip")) | .browser_download_url' | head -n1)
-        MODULE_NAME=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name | endswith(".zip")) | .name' | head -n1)
-        
-        if [ -z "$MODULE_URL" ] || [ "$MODULE_URL" = "null" ]; then
-          echo "Warning: Could not find SUSFS module release, trying direct download..."
-          MODULE_URL="https://github.com/sidex15/ksu_module_susfs/releases/latest/download/ksu_module_susfs.zip"
-          MODULE_NAME="ksu_module_susfs.zip"
-        fi
-        
-        echo "Downloading SUSFS module from: $MODULE_URL"
-        curl -L -o "$MODULE_NAME" "$MODULE_URL"
-        
-        if [ -f "$MODULE_NAME" ]; then
-          echo "SUSFS module downloaded successfully: $MODULE_NAME"
-          ls -lh "$MODULE_NAME"
-        else
-          echo "Warning: SUSFS module download may have failed"
-        fi
-
+    
     - name: Clean Up ABI Protected Exports
       shell: bash
       run: |
@@ -698,6 +670,95 @@ runs:
         echo "warnings_count=$WARNINGS_COUNT" >> "$GITHUB_OUTPUT"
         echo "image_sha256=$IMAGE_SHA256" >> "$GITHUB_OUTPUT"
 
+    - name: Download and Package ZRAM Module
+      if: ${{ inputs.enable_zram == 'true' }}
+      id: zram_find
+      shell: bash
+      continue-on-error: true
+      run: |
+        set -e
+        echo "Attempting to get ZRAM module zip download link..."
+        retries=3
+        success=0
+        for i in $(seq 1 $retries); do
+          echo "Attempt $i to download..."
+          download_url=$(curl -s https://api.github.com/repos/Bouteillepleine/ZRAM-Module/releases/latest | \
+            grep "browser_download_url" | grep "ZRAM-Module-.*\.zip" | cut -d '"' -f 4 | head -n 1)
+
+          if [ -n "$download_url" ]; then
+            echo "✅ Successfully obtained download link: $download_url"
+            wget -N "$download_url" && success=1 && break
+          else
+            echo "⚠️ Failed to get download link, retrying in 3 seconds..."
+            sleep 3
+          fi
+        done
+
+        if [ "$success" -ne 1 ]; then
+          echo "❌ Failed to get ZRAM module download link after $retries attempts"
+          echo "upload=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        unzip "$(ls -t ZRAM-Module-*.zip | head -1)" -d ZRAM-Module
+        target="./ZRAM-Module/zram/zram.ko"
+        echo "Searching for zram.ko module file..."
+        search_paths=(
+          "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common/out"
+          "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/out"
+          "$GITHUB_WORKSPACE/$CONFIG/device/qcom"
+        )
+        zram_path=""
+        for path in "${search_paths[@]}"; do
+          zram_path=$(find "$path" -type f -name "zram.ko" 2>/dev/null | head -n 1)
+          [ -n "$zram_path" ] && break
+        done
+        if [ -z "$zram_path" ]; then
+          zram_path=$(find "$GITHUB_WORKSPACE/$CONFIG" -type f -name "zram.ko" 2>/dev/null | head -n 1)
+        fi
+        if [ -n "$zram_path" ] && [ -f "$zram_path" ]; then
+          echo "ZRAM module file finally located at: $zram_path"
+          mkdir -p "$(dirname "$target")"
+          if [ "$(realpath "$zram_path")" != "$(realpath "$target")" ]; then
+            cp "$zram_path" "$target"
+          else
+            echo "Source and target are the same, skipping copy"
+          fi
+          echo "upload=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "zram.ko file not found, may be unsupported kernel version or build failed"
+          echo "upload=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+    - name: Download SUSFS Module from CI
+      shell: bash
+      continue-on-error: true
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+      run: |
+        set -euo pipefail
+        echo "Downloading SUSFS module from CI..."
+        cd "$GITHUB_WORKSPACE/AnyKernel3"
+        
+        LATEST_RUN_ID=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+          "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs?status=success" | \
+          jq -r '.workflow_runs[] | select(.head_branch == "v1.5.2+") | .id' | head -n 1)
+        
+        if [ -z "$LATEST_RUN_ID" ]; then
+          echo "No successful run found for branch v1.5.2+"
+        else
+          ARTIFACT_URL=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+            "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts" | jq -r '.artifacts[0].archive_download_url')
+          if [ -n "$ARTIFACT_URL" ]; then
+            curl -L -H "Authorization: Bearer $GITHUB_TOKEN" -o ksu_module_susfs_1.5.2+_CI.zip "$ARTIFACT_URL"
+            echo "SUSFS module downloaded successfully from CI"
+            ls -lh ksu_module_susfs_1.5.2+_CI.zip
+          else
+            echo "Failed to fetch artifact URL"
+          fi
+        fi
+
     - name: Create Kernel ZIP
       id: create_zip
       shell: bash
@@ -724,53 +785,9 @@ runs:
     
         echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
 
-    - name: Final Build Summary
-      shell: bash
-      run: |
-        set -euo pipefail
-        SCHED_STATUS="No"
-        [[ "${{ env.KERNEL_VER }}" == "6.6" ]] && SCHED_STATUS="Yes (auto for 6.6)"
-        
-        {
-          echo "Model: ${OP_MODEL}"
-          echo "Android: ${{ env.ANDROID_VER }}"
-          echo "Kernel base: ${{ env.KERNEL_VER }}"
-          echo "Kernel full: ${{ env.KERNEL_FULL_VER }}"
-          echo "Kernel Uname: ${{ env.KERNEL_UNAME }}"
-          echo "SukiSU Version: ${SUKISUVER:-unknown}"
-          echo "SUSFS Version: ${SUSVER:-unknown}"
-          echo "SUSFS commit SHA: ${{ env.SUSFS_COMMIT_SHA }}"
-          echo "Hook Type: ${{ inputs.hook }}"
-          echo "LSM Enabled: ${{ inputs.lsm }}"
-          echo "ZRAM Enabled: ${{ inputs.enable_zram }}"
-          echo "SCHED_EXT Enabled: $SCHED_STATUS"
-          echo "Optimization: ${{ inputs.optimize_level }}"
-          echo "Image SHA256: ${{ steps.collect_stats.outputs.image_sha256 }}"
-          echo "Compiler: ${CLANG_VERSION:-unknown}"
-          echo "Warnings Count: ${{ steps.collect_stats.outputs.warnings_count }}"
-        } | tee summary.txt
-        {
-          echo "### Kernel Build Summary"
-          echo ""
-          echo "- Model: ${OP_MODEL}"
-          echo "- Android: ${{ env.ANDROID_VER }}"
-          echo "- Kernel Version: ${{ steps.save_metadata.outputs.kernel_version }}"
-          echo "- Kernel Uname: ${{ env.KERNEL_UNAME }}"
-          echo "- SukiSU Version: ${SUKISUVER:-unknown}"
-          echo "- SUSFS Version: ${SUSVER:-unknown}"
-          echo "- SUSFS commit SHA: [${{ env.SUSFS_COMMIT_SHA }}](https://gitlab.com/simonpunk/susfs4ksu/-/commit/${{ env.SUSFS_COMMIT_SHA }})"
-          echo "- Hook Type: ${{ inputs.hook }}"
-          echo "- LSM Enabled: ${{ inputs.lsm }}"
-          echo "- ZRAM Enabled: ${{ inputs.enable_zram }}"
-          echo "- SCHED_EXT Enabled: $SCHED_STATUS"
-          echo "- Optimization: ${{ inputs.optimize_level }}"
-          echo "- Image SHA256: ${{ steps.collect_stats.outputs.image_sha256 }}"
-          echo "- Warnings Count: ${{ steps.collect_stats.outputs.warnings_count }}"
-        } >> "$GITHUB_STEP_SUMMARY"
-
-    - name: Upload Artifacts
-      if: success() && steps.create_zip.conclusion == 'success'
+    - name: Upload ZRAM Module
+      if: ${{ inputs.enable_zram == 'true' && steps.zram_find.outputs.upload == 'true' }}
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-${{ env.CONFIG }}
-        path: ${{ env.CONFIG }}/artifacts/
+        name: ZRAM-Module_${{ env.KERNEL_VER }}_${{ env.OP_MODEL }}
+        path: ZRAM-Module/*
