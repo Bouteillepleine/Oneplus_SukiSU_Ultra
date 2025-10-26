@@ -1,8 +1,8 @@
 {
-  "model": "OP-PAD-PRO",
+  "model": "OP-NORD-4",
   "soc": "pineapple",
-  "branch": "oneplus/sm8650",
-  "manifest": "oneplus_pad_pro_v.xml",
+  "branch": "oneplus/sm7675",
+  "manifest": "oneplus_nord_4_v.xml",
   "android_version": "android14",
   "kernel_version": "6.1",
   "hmbird": false
