@@ -1,53 +1,48 @@
-name: Build OnePlus Kernels with SukiSU Ultra
-
-permissions:
-  contents: write
-  actions: write
+name: 'Build OnePlus Kernel with SukiSU Ultra'
 
 inputs:
   op_config_json:
     description: 'JSON string containing full device config'
     required: true
-    type: string
   ksu_meta:
     description: 'SukiSU Ultra metadata (branch/tag/hash)'
     required: false
-    type: string
     default: 'susfs-main/⚡Ultra⚡/'
   hook:
     description: 'Hook type (kprobe/manual/tracepoint)'
     required: false
-    type: string
     default: 'manual'
   lsm:
     description: 'Enable Baseband Guard LSM (true/false)'
     required: false
-    type: boolean
-    default: false
+    default: 'false'
   enable_zram:
     description: 'Enable additional ZRAM algorithms'
     required: false
-    type: boolean
-    default: false
+    default: 'false'
   optimize_level:
     description: 'Optimization level (O2/O3)'
     required: false
-    type: string
-    default: O2
+    default: 'O2'
   github_token:
     description: 'GitHub token for API access'
     required: true
 
 outputs:
   kernel_version:
+    description: 'Built kernel version'
     value: ${{ steps.save_metadata.outputs.kernel_version }}
   sukisu_version:
+    description: 'SukiSU version'
     value: ${{ steps.save_metadata.outputs.sukisu_version }}
   susfs_version:
+    description: 'SUSFS version'
     value: ${{ steps.save_metadata.outputs.susfs_version }}
   image_sha256:
+    description: 'Kernel image SHA256'
     value: ${{ steps.collect_stats.outputs.image_sha256 }}
   warnings:
+    description: 'Build warnings count'
     value: ${{ steps.collect_stats.outputs.warnings }}
 
 runs:
@@ -222,9 +217,11 @@ runs:
         
         echo "Using AnyKernel3 branch: $ANYKERNEL_BRANCH"
         echo "Using SUSFS branch: $SUSFS_BRANCH"
+        
         git clone --depth=1 https://github.com/Bouteillepleine/AnyKernel3.git -b "$ANYKERNEL_BRANCH"
         git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "$SUSFS_BRANCH"
-        git clone https://github.com/ShirkNeko/SukiSU_patch.git
+        git clone https://github.com/ShirkNeko/SukiSU_patch.git  # ✅ ADDED
+        
         cd susfs4ksu
         SUSFS_COMMIT_SHA=$(git rev-parse HEAD)
         echo "SUSFS_COMMIT_SHA=$SUSFS_COMMIT_SHA" >> $GITHUB_ENV
@@ -345,7 +342,8 @@ runs:
 
         if [ "$GKI_V" == "android13-5.15" ] && [ "$SUBLEVEL" -lt 123 ]; then
           echo "Fixing legacy 5.15 issues..."
-          curl -Lo fix_5.15.legacy.patch --retry 5 --retry-delay 2 --retry-connrefused https://raw.githubusercontent.com/Numbersf/Action-Build/SukiSU-Ultra/patches/fix_5.15.legacy
+          curl -Lo fix_5.15.legacy.patch --retry 5 --retry-delay 2 --retry-connrefused \
+            https://raw.githubusercontent.com/Numbersf/Action-Build/SukiSU-Ultra/patches/fix_5.15.legacy
           patch -p1 < fix_5.15.legacy.patch
         fi
 
@@ -384,18 +382,25 @@ runs:
         MIN_VERSION="5.16"
         if [ "$(printf '%s\n' "$KERNEL_VERSION" "$MIN_VERSION" | sort -V | head -n1)" = "$KERNEL_VERSION" ]; then
           echo "Patching ptrace for kernel < 5.16"
-          wget -O gki_ptrace.patch https://raw.githubusercontent.com/Numbersf/Action-Build/SukiSU-Ultra/patches/gki_ptrace.patch
-          patch -p1 -F 3 < gki_ptrace.patch || true
+          # ✅ FIXED: Handle missing patch gracefully
+          if curl -fsSL -o gki_ptrace.patch \
+            "https://raw.githubusercontent.com/Numbersf/Action-Build/SukiSU-Ultra/patches/gki_ptrace.patch" 2>/dev/null; then
+            patch -p1 -F 3 < gki_ptrace.patch || true
+          else
+            echo "⚠️ ptrace patch not available at remote URL, skipping..."
+          fi
         fi
 
         if [ "$OP_HMBIRD" = true ]; then
           echo "Patching HMBIRD..."
           echo 'obj-y += hmbird_patch.o' >> ./drivers/Makefile
-          wget -O hmbird_kernel_patch.patch https://raw.githubusercontent.com/Numbersf/Action-Build/SukiSU-Ultra/patches/hmbird_kernel_patch.patch
+          wget -O hmbird_kernel_patch.patch \
+            https://raw.githubusercontent.com/Numbersf/Action-Build/SukiSU-Ultra/patches/hmbird_kernel_patch.patch
           patch -p1 -F 3 < hmbird_kernel_patch.patch
           cd ./kernel/sched
           rm -rf ext.c ext.h build_policy.c slim.h slim_sysctl.c
-          wget -O hmbird_files_patch.patch https://raw.githubusercontent.com/Numbersf/Action-Build/SukiSU-Ultra/patches/hmbird_files_patch.patch
+          wget -O hmbird_files_patch.patch \
+            https://raw.githubusercontent.com/Numbersf/Action-Build/SukiSU-Ultra/patches/hmbird_files_patch.patch
           patch -p1 -F 3 < hmbird_files_patch.patch
         fi
 
