@@ -294,7 +294,6 @@ runs:
         [[ -n "$CUSTOM_TAG" ]] && echo "Custom tag: $CUSTOM_TAG" || echo "Custom tag: Not set"
         [[ -n "$MANUAL_HASH" ]] && echo "Manual hash: $MANUAL_HASH" || echo "Manual hash: Not set"
     
-        # Download and execute setup script with better error handling
         echo "[+] Downloading KernelSU setup script..."
         if ! curl -LSs --retry 3 --retry-delay 2 --connect-timeout 30 \
              "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
@@ -303,7 +302,6 @@ runs:
           exit 1
         fi
         
-        # Verify the script was downloaded
         if [ ! -s /tmp/ksu_setup.sh ]; then
           echo "::error::Downloaded setup script is empty"
           exit 1
@@ -320,7 +318,6 @@ runs:
           exit 1
         fi
         
-        # Verify KernelSU directory was created
         if [ ! -d "./KernelSU" ]; then
           echo "::error::KernelSU directory not created"
           echo "Current directory contents:"
@@ -330,7 +327,6 @@ runs:
         
         cd ./KernelSU
     
-        # Fetch and checkout specific commit if provided
         if [[ -n "$MANUAL_HASH" ]]; then
           echo "[+] Fetching specific commit: $MANUAL_HASH"
           if ! git fetch origin "$BRANCH_NAME" --depth=50; then
@@ -344,16 +340,49 @@ runs:
           SHORT_HASH=${MANUAL_HASH:0:8}
         fi
     
-        # Get KSU API version
         echo "[+] Fetching KSU API version..."
-        KSU_API_VERSION=$(curl -fsSL --retry 3 --connect-timeout 30 \
-          "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/$BRANCH_NAME/kernel/Makefile" | \
-          grep -m1 "KSU_VERSION_API :=" | awk -F'= ' '{print $2}' | tr -d '[:space:]')
-        
-        if [[ -z "$KSU_API_VERSION" || "$(printf '%s\n' "$KSU_API_VERSION" "3.1.7" | sort -V | head -n1)" != "3.1.7" ]]; then
-          echo "⚠️ Invalid or missing API version, using default: 3.1.7"
-          KSU_API_VERSION="3.1.7"
+        # Try to get API version from local Makefile first
+        if [ -f "kernel/Makefile" ]; then
+          KSU_API_VERSION=$(grep -m1 "KSU_VERSION_API :=" kernel/Makefile | awk -F'= ' '{print $2}' | tr -d '[:space:]' || echo "")
+          echo "Found local API version: $KSU_API_VERSION"
         fi
+        
+        # If not found locally or empty, try remote
+        if [ -z "$KSU_API_VERSION" ]; then
+          echo "Attempting to fetch from remote..."
+          # Try multiple methods to get the API version
+          KSU_API_VERSION=$(curl -fsSL --retry 3 --connect-timeout 30 \
+            "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/$BRANCH_NAME/kernel/Makefile" 2>/dev/null | \
+            grep -m1 "KSU_VERSION_API :=" | awk -F'= ' '{print $2}' | tr -d '[:space:]' || echo "")
+          
+          # If still empty, try main branch as fallback
+          if [ -z "$KSU_API_VERSION" ]; then
+            echo "Trying main branch as fallback..."
+            KSU_API_VERSION=$(curl -fsSL --retry 3 --connect-timeout 30 \
+              "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/Makefile" 2>/dev/null | \
+              grep -m1 "KSU_VERSION_API :=" | awk -F'= ' '{print $2}' | tr -d '[:space:]' || echo "")
+          fi
+        fi
+        
+        # Validate and set default if needed
+        if [[ -z "$KSU_API_VERSION" ]]; then
+          echo "⚠️ Could not fetch API version from any source, using default: 3.1.7"
+          KSU_API_VERSION="3.1.7"
+        else
+          # Validate version format (should be like 3.1.7)
+          if ! [[ "$KSU_API_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "⚠️ Invalid API version format: $KSU_API_VERSION, using default: 3.1.7"
+            KSU_API_VERSION="3.1.7"
+          else
+            # Check if version is at least 3.1.7
+            if [[ "$(printf '%s\n' "$KSU_API_VERSION" "3.1.7" | sort -V | head -n1)" != "3.1.7" ]]; then
+              echo "⚠️ API version $KSU_API_VERSION is too old, using minimum: 3.1.7"
+              KSU_API_VERSION="3.1.7"
+            fi
+          fi
+        fi
+        
+        echo "Using KSU API version: $KSU_API_VERSION"
         echo "KSU_API_VERSION=$KSU_API_VERSION" >> $GITHUB_ENV
     
         GIT_HASH=$(git rev-parse --short HEAD)
@@ -370,27 +399,16 @@ runs:
           VERSION_FULL="v$KSU_API_VERSION-$CUSTOM_TAG@$BRANCH_NAME[$USE_HASH]"
         fi
     
-        # Update Makefile with version info
         echo "[+] Updating Makefile with version info..."
         sed -i '/define get_ksu_version_full/,/endef/d' kernel/Makefile
         sed -i '/KSU_VERSION_API :=/d' kernel/Makefile
         sed -i '/KSU_VERSION_FULL :=/d' kernel/Makefile
     
-        VERSION_DEFINITIONS=$(cat <<EOF
-        define get_ksu_version_full
-        $VERSION_FULL
-        endef
+        printf 'define get_ksu_version_full\n%s\nendef\n\nKSU_VERSION_API := %s\nKSU_VERSION_FULL := %s\n' \
+          "$VERSION_FULL" "$KSU_API_VERSION" "$VERSION_FULL" > /tmp/version_def.txt
         
-        KSU_VERSION_API := $KSU_API_VERSION
-        KSU_VERSION_FULL := $VERSION_FULL
-        EOF
-        )
-    
-        awk -v def="$VERSION_DEFINITIONS" '
-          /REPO_OWNER :=/ {print; print def; inserted=1; next}
-          1
-          END {if (!inserted) print def}
-        ' kernel/Makefile > kernel/Makefile.tmp && mv kernel/Makefile.tmp kernel/Makefile
+        awk '/REPO_OWNER :=/ {print; system("cat /tmp/version_def.txt"); inserted=1; next} 1 END {if (!inserted) system("cat /tmp/version_def.txt")}' \
+          kernel/Makefile > kernel/Makefile.tmp && mv kernel/Makefile.tmp kernel/Makefile
     
         KSU_VERSION=$(expr $(git rev-list --count HEAD 2>/dev/null || echo 13000) + 10700)
         echo "SUKISUVER=$KSU_VERSION" >> $GITHUB_ENV
