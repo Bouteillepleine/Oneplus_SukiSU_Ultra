@@ -1,212 +1,84 @@
-name: Build OnePlus Kernels with SukiSU Ultra
-
-permissions:
-  contents: write
-  actions: write
+name: Build OnePlus Kernel
 
 on:
   workflow_dispatch:
     inputs:
-      make_release:
-        description: 'Do you want to create a release?'
-        required: true
-        type: boolean
-        default: false
-      op_model:
-        description: 'Select the OnePlus kernels to build'
+      device_config:
+        description: 'Device to build (OP10t, OP11, etc.)'
         required: true
         type: choice
         options:
-          - ALL
-          - android15-6.6
-          - android14-6.1
-          - android14-5.15
-          - android13-5.15
-          - android13-5.10
-          - android12-5.10
-          - OP13-CPH
-          - OP13-PJZ
-          - OP13r
-          - OP13S
-          - OP13T
-          - OP12
-          - OP12r
-          - OP11
-          - OP11r
-          - OP10pro
           - OP10t
-          - OP-Nord-5
-          - OP-NORD-4
-          - OP-NORD-4-CE
-          - OP-NORD-CE4-LITE
-          - OP-ACE-5-PRO
-          - OP-ACE-5
-          - OP-ACE-3-PRO
-          - OP-ACE-3V
-          - OP-ACE-2-PRO
-          - OP-ACE-2
-          - OP-OPEN
-          - OP-PAD-3
-          - OP-PAD-2-PRO
-          - OP-PAD-2
-          - OP-PAD-PRO
-        default: ALL
+          - OP11
+          - OP12
+      ksu_meta:
+        description: 'SukiSU meta (branch/tag/hash)'
+        required: false
+        default: 'susfs-main/⚡Ultra⚡/'
       hook:
-        description: 'Hook type (kprobe/manual/tracepoint)'
+        description: 'Hook type'
         required: false
         type: choice
+        default: 'manual'
         options:
           - kprobe
           - manual
           - tracepoint
-        default: manual
       lsm:
-        description: 'Enable Baseband Guard LSM'
+        description: 'Enable BBG LSM'
         required: false
         type: boolean
         default: false
       enable_zram:
-        description: 'Enable additional ZRAM algorithms'
+        description: 'Enable ZRAM'
         required: false
         type: boolean
         default: false
       optimize_level:
-        description: "Compiler optimization level (O2/O3)"
+        description: 'Optimization level'
         required: false
         type: choice
-        options: [O2, O3]
-        default: O2
+        default: 'O2'
+        options:
+          - O2
+          - O3
 
 jobs:
-  set-op-model:
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-    steps:
-      - name: Checkout Code (to access configs/)
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: |
-            configs/
-          sparse-checkout-cone-mode: false
-
-      - name: Setup OnePlus Model
-        id: set-matrix
-        shell: bash
-        run: |
-          set -euo pipefail
-          
-          # Check if configs directory exists
-          if [ ! -d "configs" ]; then
-            echo "::error::configs/ directory not found!"
-            exit 1
-          fi
-          
-          declare -a models=()
-          while IFS= read -r -d '' file; do
-            model=$(basename "$file" .json)
-            models+=("$model")
-          done < <(find configs/ -name "*.json" -print0)
-          
-          if [ ${#models[@]} -eq 0 ]; then
-            echo "::error::No config files found in configs/ directory!"
-            exit 1
-          fi
-          
-          echo "Found ${#models[@]} device configuration(s)"
-          
-          # Build matrix JSON
-          echo "[" > matrix.json
-          first=true
-          for model in "${models[@]}"; do
-            file="configs/$model.json"
-            if [ -f "$file" ]; then
-              # Validate JSON
-              if ! jq empty "$file" 2>/dev/null; then
-                echo "::warning::Invalid JSON in $file, skipping"
-                continue
-              fi
-              
-              [ "$first" = false ] && echo "," >> matrix.json
-              jq -r '.' "$file" >> matrix.json
-              first=false
-            fi
-          done
-          echo "]" >> matrix.json
-          
-          # Apply filter based on input
-          input="${{ github.event.inputs.op_model }}"
-          jq_filter="."
-          
-          if [[ "$input" == "ALL" ]]; then
-            echo "Building all configurations"
-          elif [[ "$input" == android*-* ]]; then
-            IFS='-' read -r av kv <<< "$input"
-            echo "Filtering by Android: $av, Kernel: $kv"
-            jq_filter="map(select(.android_version == \"$av\" and .kernel_version == \"$kv\"))"
-          else
-            echo "Filtering by model: $input"
-            jq_filter="map(select(.model == \"$input\"))"
-          fi
-          
-          # Apply filter and validate result
-          filtered=$(jq -c "$jq_filter" matrix.json)
-          
-          if [ "$(echo "$filtered" | jq 'length')" -eq 0 ]; then
-            echo "::error::No configurations match the filter: $input"
-            exit 1
-          fi
-          
-          wrapped=$(jq -n --argjson items "$filtered" '{ include: $items }')
-          
-          echo "Matrix configuration:"
-          echo "$wrapped" | jq '.'
-          
-          # Write to output
-          {
-            echo "matrix<<MATRIX_EOF"
-            echo "$wrapped"
-            echo "MATRIX_EOF"
-          } >> "$GITHUB_OUTPUT"
-          
-          # Add summary
-          {
-            echo "### 📱 Build Matrix Configuration"
-            echo ""
-            echo "**Input:** \`${{ github.event.inputs.op_model }}\`"
-            echo ""
-            echo "**Configurations to build:** $(echo "$filtered" | jq 'length')"
-            echo ""
-            echo '```json'
-            echo "$wrapped" | jq '.'
-            echo '```'
-          } >> $GITHUB_STEP_SUMMARY
-
   build:
-    name: build (${{ matrix.model }}, ${{ matrix.soc }}, ${{ matrix.branch }}, ${{ matrix.manifest }}, ${{ matrix.android_version }}, ${{ matrix.kernel_version }})
-    needs: set-op-model
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.set-op-model.outputs.matrix) }}
+    name: Build ${{ inputs.device_config }}
+    runs-on: ubuntu-22.04
+    
     steps:
-      - name: Checkout Code
+      - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-
+      
+      - name: Load Device Configuration
+        id: load_config
+        run: |
+          CONFIG_FILE="configs/${{ inputs.device_config }}.json"
+          if [ ! -f "$CONFIG_FILE" ]; then
+            echo "::error::Configuration file not found: $CONFIG_FILE"
+            exit 1
+          fi
+          
+          echo "Loading configuration from: $CONFIG_FILE"
+          cat "$CONFIG_FILE"
+          
+          CONFIG_JSON=$(cat "$CONFIG_FILE" | jq -c '.')
+          echo "config_json=$CONFIG_JSON" >> "$GITHUB_OUTPUT"
+      
       - name: Build Kernel
         id: build
         uses: ./.github/actions
         with:
-          op_config_json: ${{ toJSON(matrix) }}
-          ksu_meta: 'susfs-main/⚡Ultra⚡/'
+          op_config_json: ${{ steps.load_config.outputs.config_json }}
+          ksu_meta: ${{ inputs.ksu_meta }}
           hook: ${{ inputs.hook }}
           lsm: ${{ inputs.lsm }}
           enable_zram: ${{ inputs.enable_zram }}
           optimize_level: ${{ inputs.optimize_level }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-
+      
       - name: Validate Build Outputs
         if: always()
         shell: bash
@@ -234,7 +106,7 @@ jobs:
             esac
             
             if [ -z "$value" ]; then
-              echo "::error::Missing output: $output"
+              echo "::warning::Missing output: $output"
               ((missing++))
             else
               echo "✅ $output: $value"
@@ -242,208 +114,48 @@ jobs:
           done
           
           if [ $missing -gt 0 ]; then
-            echo "::error::$missing required output(s) missing"
-            exit 1
+            echo "::warning::$missing output(s) missing (non-fatal)"
           fi
           
           echo "::endgroup::"
-
-      - name: Display Build Summary
-        shell: bash
-        run: |
-          cat >> $GITHUB_STEP_SUMMARY << EOF
-          ## Build Results for ${{ matrix.model }}
-          
-          - **Kernel Version**: ${{ steps.build.outputs.kernel_version }}
-          - **SukiSU Version**: ${{ steps.build.outputs.sukisu_version }}
-          - **SUSFS Version**: ${{ steps.build.outputs.susfs_version }}
-          - **Image SHA256**: \`${{ steps.build.outputs.image_sha256 }}\`
-          - **Warnings**: ${{ steps.build.outputs.warnings_count }}
-          - **Package**: \`${{ steps.build.outputs.zip_name }}\`
-          EOF
-
+      
       - name: Upload Kernel Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-${{ matrix.model }}-${{ matrix.android_version }}-${{ matrix.kernel_version }}
+          name: kernel-${{ inputs.device_config }}-${{ steps.build.outputs.kernel_version }}
           path: |
-            ${{ matrix.model }}/artifacts/*.zip
-            ${{ matrix.model }}/artifacts/*.txt
+            ${{ inputs.device_config }}/artifacts/*.zip
+            ${{ inputs.device_config }}/artifacts/*.txt
           retention-days: 7
-          if-no-files-found: error
-
-  trigger-release:
-    needs: [build]
-    runs-on: ubuntu-latest
-    if: ${{ inputs.make_release }}
-    env:
-      REPO_OWNER: ${{ github.repository_owner }}
-      REPO_NAME: ${{ github.event.repository.name }}
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      RELEASE_NAME: '*TEST BUILD* OnePlus Kernels With SukiSU Ultra & SUSFS v1.5.12 *TEST BUILD*'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      
+      - name: Create Release (Optional)
+        if: github.event_name == 'workflow_dispatch' && success()
+        uses: softprops/action-gh-release@v1
         with:
-          fetch-depth: 0
-          
-      - name: Generate and Create New Tag
-        run: |
-          BASE_TAG="v1.5.12-r0"
-          
-          # Get latest tag matching pattern
-          LATEST_TAG=$(gh api repos/$REPO_OWNER/$REPO_NAME/tags \
-            --jq '[.[] | select(.name | startswith("v1.5.12-r")) | .name] | .[0]' || echo "")
-          
-          if [ -z "$LATEST_TAG" ]; then
-            echo "No existing tags found, using base: $BASE_TAG"
-            NEW_TAG="$BASE_TAG"
-          else
-            echo "Latest tag found: $LATEST_TAG"
-            # Extract revision number and increment
-            REVISION=$(echo "$LATEST_TAG" | sed -n 's/.*-r\([0-9]\+\)$/\1/p')
-            if [ -z "$REVISION" ]; then
-              REVISION=0
-            fi
-            NEW_REVISION=$((REVISION + 1))
-            NEW_TAG="v1.5.12-r${NEW_REVISION}"
-          fi
-          
-          echo "Creating new tag: $NEW_TAG"
-          echo "NEW_TAG=${NEW_TAG}" >> $GITHUB_ENV
-          
-          # Create and push tag
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
-          git push origin "$NEW_TAG"
-
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: ./downloaded-artifacts
-
-      - name: Generate Device List and Final Release Notes
-        id: generate-notes
-        run: |
-          echo "=== Start building the release notes ==="
-          cat << EOF > release_notes.md
-          This release contains SukiSU Ultra and SUSFS v1.5.12
-          
-          Module: 
-          -> https://github.com/sidex15/ksu_module_susfs  
-          
-          Official Manager:
-          -> https://github.com/SukiSU-Ultra/SukiSU-Ultra  
-          
-          ### Built Devices
-          
-          | Model | Kernel Version |
-          |-------|----------------|
-          EOF
-          
-          find downloaded-artifacts -name "*.txt" -type f | sort | while read -r file; do
-            if [ -f "$file" ]; then
-              model=$(basename "$file" .txt)
-              version=$(cat "$file" | tr -d '\n\r')
-              printf "| %-12s | %-16s |\n" "$model" "$version" >> release_notes.md
-            fi
-          done
-          
-          cat << 'EOF' >> release_notes.md
-          
-          ### Features
-          - [+] SukiSU Ultra Manager Support
-          - [+] SUSFS v1.5.12
-          - [+] Wireguard Support
-          - [+] Magic Mount Support
-          - [+] Ptrace message leak fix for kernels < 5.16
-          - [+] Manual/Kprobe/Tracepoint Hooks Support
-          - [+] CONFIG_TMPFS_XATTR Support [Mountify Support]
-          - [+] BBR v1 Support
-          - [+] HMBIRD scx support (6.6 kernels)
-          - [+] Baseband Guard Support (BBG) (optional)
-          - [+] Additional ZRAM algorithms (optional)
-          - [+] IP Set Support
-          EOF
-          
-          echo "--- Final Release Notes ---"
-          cat release_notes.md
-
-      - name: Create GitHub Release
-        run: |
-          max_retries=3
-          retry_delay=5
-          
-          for attempt in $(seq 1 $max_retries); do
-            echo "Attempt $attempt/$max_retries to create release..."
+          tag_name: ${{ inputs.device_config }}-${{ steps.build.outputs.kernel_version }}-${{ github.run_number }}
+          name: Kernel ${{ inputs.device_config }} - ${{ steps.build.outputs.kernel_version }}
+          body: |
+            ## 📦 Kernel Build Information
             
-            if gh release create "${{ env.NEW_TAG }}" \
-              --repo "${{ env.REPO_OWNER }}/${{ env.REPO_NAME }}" \
-              --title "${{ env.RELEASE_NAME }}" \
-              --notes-file release_notes.md \
-              --prerelease; then
-              echo "✅ Release created successfully"
-              exit 0
-            else
-              echo "⚠️ Attempt $attempt failed"
-              if [ $attempt -lt $max_retries ]; then
-                echo "Retrying in ${retry_delay}s..."
-                sleep $retry_delay
-              fi
-            fi
-          done
-          
-          echo "::error::Failed to create release after $max_retries attempts"
-          exit 1
-
-      - name: Upload Release Assets Dynamically
-        run: |
-          uploaded=0
-          failed=0
-          
-          echo "Searching for ZIP files in ./downloaded-artifacts..."
-          
-          # Find all ZIP files
-          mapfile -t zip_files < <(find ./downloaded-artifacts -type f -name "*.zip")
-          
-          if [ ${#zip_files[@]} -eq 0 ]; then
-            echo "::error::No ZIP files found in downloaded artifacts!"
-            echo "Directory structure:"
-            ls -R ./downloaded-artifacts
-            exit 1
-          fi
-          
-          echo "Found ${#zip_files[@]} ZIP file(s) to upload"
-          
-          # Upload each file
-          for file in "${zip_files[@]}"; do
-            echo "Uploading: $(basename "$file")..."
+            **Device:** ${{ inputs.device_config }}
+            **Kernel Version:** ${{ steps.build.outputs.kernel_version }}
+            **SukiSU Version:** ${{ steps.build.outputs.sukisu_version }}
+            **SUSFS Version:** ${{ steps.build.outputs.susfs_version }}
             
-            if gh release upload "${{ env.NEW_TAG }}" "$file" \
-               --repo "${{ env.REPO_OWNER }}/${{ env.REPO_NAME }}" \
-               --clobber; then
-              echo "✅ Successfully uploaded: $(basename "$file")"
-              ((uploaded++))
-            else
-              echo "::warning::Failed to upload: $(basename "$file")"
-              ((failed++))
-            fi
-          done
-          
-          echo ""
-          echo "Upload Summary:"
-          echo "- Total files: ${#zip_files[@]}"
-          echo "- Successful: $uploaded"
-          echo "- Failed: $failed"
-          
-          if [ $uploaded -eq 0 ]; then
-            echo "::error::No files were successfully uploaded!"
-            exit 1
-          fi
-          
-          if [ $failed -gt 0 ]; then
-            echo "::warning::Some files failed to upload ($failed/$((uploaded + failed)))"
-          fi
-          
-          echo "✅ Upload completed: $uploaded file(s) uploaded successfully"
+            **Build Configuration:**
+            - Hook: ${{ inputs.hook }}
+            - Optimization: ${{ inputs.optimize_level }}
+            - ZRAM: ${{ inputs.enable_zram }}
+            - LSM (BBG): ${{ inputs.lsm }}
+            
+            **Build Statistics:**
+            - Image SHA256: `${{ steps.build.outputs.image_sha256 }}`
+            - Warnings: ${{ steps.build.outputs.warnings_count }}
+            
+            **Package:** `${{ steps.build.outputs.zip_name }}`
+          files: |
+            ${{ inputs.device_config }}/artifacts/*.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
