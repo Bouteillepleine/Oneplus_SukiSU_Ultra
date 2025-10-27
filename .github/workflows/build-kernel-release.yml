@@ -51,11 +51,6 @@ on:
           - OP-PAD-2
           - OP-PAD-PRO
         default: ALL
-      ksu_meta:
-        description: 'SukiSU Ultra metadata (branch/tag/hash)'
-        required: false
-        type: string
-        default: 'susfs-main/⚡Ultra⚡/'
       hook:
         description: 'Hook type (kprobe/manual/tracepoint)'
         required: false
@@ -144,7 +139,7 @@ jobs:
           echo "MATRIX_EOF" >> "$GITHUB_OUTPUT"
 
   build:
-    name: build (${{ matrix.model }}, ${{ matrix.soc }}, ${{ matrix.branch }}, ${{ matrix.manifest }}, ${{ matrix.android_version }}, ${{ matrix.kernel_version }}, ${{ inputs.ksu_meta }})
+    name: build (${{ matrix.model }}, ${{ matrix.soc }}, ${{ matrix.branch }}, ${{ matrix.manifest }}, ${{ matrix.android_version }}, ${{ matrix.kernel_version }})
     needs: set-op-model
     runs-on: ubuntu-latest
     strategy:
@@ -161,7 +156,7 @@ jobs:
         uses: ./.github/actions
         with:
           op_config_json: ${{ toJSON(matrix) }}
-          ksu_meta: ${{ inputs.ksu_meta }}
+          ksu_meta: 'susfs-main/⚡Ultra⚡/'  # Hardcoded default value
           hook: ${{ inputs.hook }}
           lsm: ${{ inputs.lsm }}
           enable_zram: ${{ inputs.enable_zram }}
