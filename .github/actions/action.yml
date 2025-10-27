@@ -870,7 +870,7 @@ runs:
         echo "sukisu_version=${SUKISUVER:-unknown}" >> "$GITHUB_OUTPUT"
         echo "susfs_version=${SUSVER:-unknown}" >> "$GITHUB_OUTPUT"
 
-    - name: Collect Build Stats / Validate Image
+        - name: Collect Build Stats / Validate Image
       id: collect_stats
       shell: bash
       run: |
@@ -907,8 +907,12 @@ runs:
         echo "Image size: $(numfmt --to=iec-i --suffix=B $ACTUAL_SIZE)"
         echo "Build warnings: $WARNINGS_COUNT"
         
-        echo "warnings_count=$WARNINGS_COUNT" >> "$GITHUB_OUTPUT"
-        echo "image_sha256=$IMAGE_SHA256" >> "$GITHUB_OUTPUT"
+        # Write outputs properly
+        {
+          echo "warnings_count=$WARNINGS_COUNT"
+          echo "image_sha256=$IMAGE_SHA256"
+        } >> "$GITHUB_OUTPUT"
+        
         echo "✅ Stats collected"
         echo "::endgroup::"
 
