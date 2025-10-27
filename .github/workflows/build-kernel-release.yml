@@ -95,48 +95,92 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          
+          # Check if configs directory exists
+          if [ ! -d "configs" ]; then
+            echo "::error::configs/ directory not found!"
+            exit 1
+          fi
+          
           declare -a models=()
           while IFS= read -r -d '' file; do
             model=$(basename "$file" .json)
             models+=("$model")
           done < <(find configs/ -name "*.json" -print0)
-        
+          
           if [ ${#models[@]} -eq 0 ]; then
-            echo "Error: No config files found in configs/ directory!"
+            echo "::error::No config files found in configs/ directory!"
             exit 1
           fi
-        
+          
+          echo "Found ${#models[@]} device configuration(s)"
+          
+          # Build matrix JSON
           echo "[" > matrix.json
-          for i in "${!models[@]}"; do
-            model="${models[$i]}"
+          first=true
+          for model in "${models[@]}"; do
             file="configs/$model.json"
             if [ -f "$file" ]; then
-              jq -r '.' "$file" >> matrix.json
-              if [ $((i+1)) -lt ${#models[@]} ]; then
-                echo "," >> matrix.json
+              # Validate JSON
+              if ! jq empty "$file" 2>/dev/null; then
+                echo "::warning::Invalid JSON in $file, skipping"
+                continue
               fi
+              
+              [ "$first" = false ] && echo "," >> matrix.json
+              jq -r '.' "$file" >> matrix.json
+              first=false
             fi
           done
           echo "]" >> matrix.json
-        
+          
+          # Apply filter based on input
           input="${{ github.event.inputs.op_model }}"
           jq_filter="."
-        
+          
           if [[ "$input" == "ALL" ]]; then
-            :
+            echo "Building all configurations"
           elif [[ "$input" == android*-* ]]; then
             IFS='-' read -r av kv <<< "$input"
+            echo "Filtering by Android: $av, Kernel: $kv"
             jq_filter="map(select(.android_version == \"$av\" and .kernel_version == \"$kv\"))"
           else
+            echo "Filtering by model: $input"
             jq_filter="map(select(.model == \"$input\"))"
           fi
-        
+          
+          # Apply filter and validate result
           filtered=$(jq -c "$jq_filter" matrix.json)
+          
+          if [ "$(echo "$filtered" | jq 'length')" -eq 0 ]; then
+            echo "::error::No configurations match the filter: $input"
+            exit 1
+          fi
+          
           wrapped=$(jq -n --argjson items "$filtered" '{ include: $items }')
-        
-          echo "matrix<<MATRIX_EOF" >> "$GITHUB_OUTPUT"
-          echo "$wrapped" >> "$GITHUB_OUTPUT"
-          echo "MATRIX_EOF" >> "$GITHUB_OUTPUT"
+          
+          echo "Matrix configuration:"
+          echo "$wrapped" | jq '.'
+          
+          # Write to output
+          {
+            echo "matrix<<MATRIX_EOF"
+            echo "$wrapped"
+            echo "MATRIX_EOF"
+          } >> "$GITHUB_OUTPUT"
+          
+          # Add summary
+          {
+            echo "### 📱 Build Matrix Configuration"
+            echo ""
+            echo "**Input:** \`${{ github.event.inputs.op_model }}\`"
+            echo ""
+            echo "**Configurations to build:** $(echo "$filtered" | jq 'length')"
+            echo ""
+            echo '```json'
+            echo "$wrapped" | jq '.'
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY
 
   build:
     name: build (${{ matrix.model }}, ${{ matrix.soc }}, ${{ matrix.branch }}, ${{ matrix.manifest }}, ${{ matrix.android_version }}, ${{ matrix.kernel_version }})
@@ -162,6 +206,47 @@ jobs:
           enable_zram: ${{ inputs.enable_zram }}
           optimize_level: ${{ inputs.optimize_level }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Validate Build Outputs
+        if: always()
+        shell: bash
+        run: |
+          echo "::group::Validate build outputs"
+          
+          required_outputs=(
+            "kernel_version"
+            "sukisu_version"
+            "susfs_version"
+            "image_sha256"
+            "warnings_count"
+            "zip_name"
+          )
+          
+          missing=0
+          for output in "${required_outputs[@]}"; do
+            case "$output" in
+              kernel_version) value="${{ steps.build.outputs.kernel_version }}" ;;
+              sukisu_version) value="${{ steps.build.outputs.sukisu_version }}" ;;
+              susfs_version) value="${{ steps.build.outputs.susfs_version }}" ;;
+              image_sha256) value="${{ steps.build.outputs.image_sha256 }}" ;;
+              warnings_count) value="${{ steps.build.outputs.warnings_count }}" ;;
+              zip_name) value="${{ steps.build.outputs.zip_name }}" ;;
+            esac
+            
+            if [ -z "$value" ]; then
+              echo "::error::Missing output: $output"
+              ((missing++))
+            else
+              echo "✅ $output: $value"
+            fi
+          done
+          
+          if [ $missing -gt 0 ]; then
+            echo "::error::$missing required output(s) missing"
+            exit 1
+          fi
+          
+          echo "::endgroup::"
 
       - name: Display Build Summary
         shell: bash
@@ -205,17 +290,33 @@ jobs:
       - name: Generate and Create New Tag
         run: |
           BASE_TAG="v1.5.12-r0"
-          LATEST_TAG=$(gh api repos/$REPO_OWNER/$REPO_NAME/tags --jq '.[0].name')
+          
+          # Get latest tag matching pattern
+          LATEST_TAG=$(gh api repos/$REPO_OWNER/$REPO_NAME/tags \
+            --jq '[.[] | select(.name | startswith("v1.5.12-r")) | .name] | .[0]' || echo "")
+          
           if [ -z "$LATEST_TAG" ]; then
-            LATEST_TAG="$BASE_TAG"
+            echo "No existing tags found, using base: $BASE_TAG"
+            NEW_TAG="$BASE_TAG"
           else
-            LATEST_TAG=$(printf "%s\n%s\n" "$LATEST_TAG" "$BASE_TAG" | sort -rV | head -n1)
+            echo "Latest tag found: $LATEST_TAG"
+            # Extract revision number and increment
+            REVISION=$(echo "$LATEST_TAG" | sed -n 's/.*-r\([0-9]\+\)$/\1/p')
+            if [ -z "$REVISION" ]; then
+              REVISION=0
+            fi
+            NEW_REVISION=$((REVISION + 1))
+            NEW_TAG="v1.5.12-r${NEW_REVISION}"
           fi
-          NEW_TAG=$(echo "$LATEST_TAG" | awk -F'-r' '{suffix=$2; if (!suffix) suffix=0; suffix++; printf "%s-r%d", $1, suffix}')
-          echo "New tag: $NEW_TAG"
+          
+          echo "Creating new tag: $NEW_TAG"
           echo "NEW_TAG=${NEW_TAG}" >> $GITHUB_ENV
-          git tag $NEW_TAG
-          git push origin $NEW_TAG
+          
+          # Create and push tag
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
+          git push origin "$NEW_TAG"
 
       - name: Download Artifacts
         uses: actions/download-artifact@v4
@@ -271,29 +372,78 @@ jobs:
 
       - name: Create GitHub Release
         run: |
-          gh release create "${{ env.NEW_TAG }}" \
-            --repo "${{ env.REPO_OWNER }}/${{ env.REPO_NAME }}" \
-            --title "${{ env.RELEASE_NAME }}" \
-            --notes-file release_notes.md \
-            --prerelease
-
-      - name: Upload Release Assets Dynamically
-        run: |
-          uploaded=0
-          for file in ./downloaded-artifacts/*/*.zip; do
-            if [ -f "$file" ]; then
-              echo "Uploading $file..."
-              if gh release upload "${{ env.NEW_TAG }}" "$file" --clobber; then
-                ((uploaded++))
-              else
-                echo "⚠️ Failed to upload $file"
+          max_retries=3
+          retry_delay=5
+          
+          for attempt in $(seq 1 $max_retries); do
+            echo "Attempt $attempt/$max_retries to create release..."
+            
+            if gh release create "${{ env.NEW_TAG }}" \
+              --repo "${{ env.REPO_OWNER }}/${{ env.REPO_NAME }}" \
+              --title "${{ env.RELEASE_NAME }}" \
+              --notes-file release_notes.md \
+              --prerelease; then
+              echo "✅ Release created successfully"
+              exit 0
+            else
+              echo "⚠️ Attempt $attempt failed"
+              if [ $attempt -lt $max_retries ]; then
+                echo "Retrying in ${retry_delay}s..."
+                sleep $retry_delay
               fi
             fi
           done
           
-          if [ $uploaded -eq 0 ]; then
-            echo "::error::No ZIP files were uploaded!"
+          echo "::error::Failed to create release after $max_retries attempts"
+          exit 1
+
+      - name: Upload Release Assets Dynamically
+        run: |
+          uploaded=0
+          failed=0
+          
+          echo "Searching for ZIP files in ./downloaded-artifacts..."
+          
+          # Find all ZIP files
+          mapfile -t zip_files < <(find ./downloaded-artifacts -type f -name "*.zip")
+          
+          if [ ${#zip_files[@]} -eq 0 ]; then
+            echo "::error::No ZIP files found in downloaded artifacts!"
+            echo "Directory structure:"
+            ls -R ./downloaded-artifacts
             exit 1
           fi
           
-          echo "✅ Successfully uploaded $uploaded file(s)"
+          echo "Found ${#zip_files[@]} ZIP file(s) to upload"
+          
+          # Upload each file
+          for file in "${zip_files[@]}"; do
+            echo "Uploading: $(basename "$file")..."
+            
+            if gh release upload "${{ env.NEW_TAG }}" "$file" \
+               --repo "${{ env.REPO_OWNER }}/${{ env.REPO_NAME }}" \
+               --clobber; then
+              echo "✅ Successfully uploaded: $(basename "$file")"
+              ((uploaded++))
+            else
+              echo "::warning::Failed to upload: $(basename "$file")"
+              ((failed++))
+            fi
+          done
+          
+          echo ""
+          echo "Upload Summary:"
+          echo "- Total files: ${#zip_files[@]}"
+          echo "- Successful: $uploaded"
+          echo "- Failed: $failed"
+          
+          if [ $uploaded -eq 0 ]; then
+            echo "::error::No files were successfully uploaded!"
+            exit 1
+          fi
+          
+          if [ $failed -gt 0 ]; then
+            echo "::warning::Some files failed to upload ($failed/$((uploaded + failed)))"
+          fi
+          
+          echo "✅ Upload completed: $uploaded file(s) uploaded successfully"
