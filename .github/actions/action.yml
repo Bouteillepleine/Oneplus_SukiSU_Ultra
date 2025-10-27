@@ -885,12 +885,12 @@ runs:
         OUT="$COMMON/out"
         IMG="$OUT/arch/arm64/boot/Image"
         
-        # Count warnings and save to file
-        WARNINGS_COUNT=$(grep -i -E 'warning:' "$COMMON/build.log" | wc -l || echo "0")
-        echo "$WARNINGS_COUNT" > "$OUT/warnings.txt"
+        # Count warnings and save to file (suppress output)
+        WARNINGS_COUNT=$(grep -i -E 'warning:' "$COMMON/build.log" 2>/dev/null | wc -l || echo "0")
+        echo "$WARNINGS_COUNT" > "$OUT/warnings.txt" 2>&1
         
         # Validate image
-        file "$IMG" > "$OUT/Image.file"
+        file "$IMG" > "$OUT/Image.file" 2>&1
         KERNEL_UNAME=$(strings "$IMG" | grep -E 'Linux version.*#' | tail -n1)
         echo "Kernel Uname: $KERNEL_UNAME"
         echo "KERNEL_UNAME=$KERNEL_UNAME" >> "$GITHUB_ENV"
@@ -908,15 +908,15 @@ runs:
           exit 1
         fi
         
-        # Get SHA256
-        IMAGE_SHA256=$(cut -d' ' -f1 "$OUT/Image.sha256")
+        # Get SHA256 (suppress any potential output)
+        IMAGE_SHA256=$(cut -d' ' -f1 "$OUT/Image.sha256" 2>/dev/null)
         
         # Display info
         echo "Image sha256: $IMAGE_SHA256"
         echo "Image size: $(numfmt --to=iec-i --suffix=B $ACTUAL_SIZE)"
         echo "Build warnings: $WARNINGS_COUNT"
         
-        # Write outputs in a single block to prevent stray output
+        # Write outputs - redirect to file descriptor to avoid stdout pollution
         {
           echo "warnings_count=$WARNINGS_COUNT"
           echo "image_sha256=$IMAGE_SHA256"
@@ -1075,7 +1075,7 @@ runs:
           echo "- **Optimization**: ${{ inputs.optimize_level }}"
           echo "- **Clang**: ${CLANG_VERSION}"
           echo "- **SHA256**: \`${{ steps.collect_stats.outputs.image_sha256 }}\`"
-          echo "- **Warnings**: ${{ steps.collect_stats.outputs.warnings_count }}\`"
+          echo "- **Warnings**: ${{ steps.collect_stats.outputs.warnings_count }}"
           echo "- **Package**: \`${{ steps.create_zip.outputs.zip_name }}\`"
         } | tee summary.txt
         cat summary.txt >> "$GITHUB_STEP_SUMMARY"
