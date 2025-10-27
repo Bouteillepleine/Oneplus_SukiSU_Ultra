@@ -1,4 +1,5 @@
 name: 'Build OnePlus Kernel with SukiSU Ultra'
+description: 'Composite action to build OnePlus kernels with SukiSU Ultra and SUSFS'
 
 inputs:
   op_config_json:
@@ -994,28 +995,27 @@ runs:
         OUT="$COMMON/out"
         IMG="$OUT/arch/arm64/boot/Image"
         
-        # ===== Count warnings =====
+        # Count warnings
         if [ -f "$COMMON/build.log" ]; then
           WARNINGS_COUNT=$(grep -c -i -E 'warning:' "$COMMON/build.log" || echo "0")
         else
           WARNINGS_COUNT=0
         fi
         
-        # Save to file for reference
         echo "$WARNINGS_COUNT" > "$OUT/warnings.txt"
         
-        # ===== Get kernel metadata =====
+        # Get kernel metadata
         file "$IMG" > "$OUT/Image.file" 2>&1
         KERNEL_UNAME=$(strings "$IMG" | grep -E 'Linux version.*#' | tail -n1 || echo "Unknown")
         
-        # ===== Validate ARM64 architecture =====
+        # Validate ARM64
         if ! file "$IMG" | grep -qi 'ARM64'; then
           echo "::error::Image does not appear to be ARM64"
           file "$IMG"
           exit 1
         fi
         
-        # ===== Validate minimum size (6MB threshold) =====
+        # Validate size
         MIN_SIZE=$((6*1024*1024))
         ACTUAL_SIZE=$(stat -c %s "$IMG")
         
@@ -1024,14 +1024,13 @@ runs:
           exit 1
         fi
         
-        # ===== Get SHA256 checksum =====
+        # Get SHA256
         if [ -f "$OUT/Image.sha256" ]; then
           IMAGE_SHA256=$(cut -d' ' -f1 "$OUT/Image.sha256")
         else
           IMAGE_SHA256=$(sha256sum "$IMG" | awk '{print $1}')
         fi
         
-        # ===== Display information (with labels!) =====
         echo "============================================"
         echo "📊 Build Statistics"
         echo "============================================"
@@ -1041,11 +1040,9 @@ runs:
         echo "Build warnings: $WARNINGS_COUNT"
         echo "============================================"
         
-        # ===== Write outputs to GitHub Actions =====
         printf "warnings_count=%s\n" "$WARNINGS_COUNT" >> "$GITHUB_OUTPUT"
         printf "image_sha256=%s\n" "$IMAGE_SHA256" >> "$GITHUB_OUTPUT"
         
-        # ===== Write to environment =====
         echo "KERNEL_UNAME=$KERNEL_UNAME" >> "$GITHUB_ENV"
         
         echo "✅ Statistics collected and validated"
@@ -1170,25 +1167,17 @@ runs:
         echo "Creating flashable ZIP: $ZIP_NAME"
         zip -r "$ARTIFACTS_DIR/$ZIP_NAME" ./* -x "*.git*" >/dev/null
     
-        # Clean up old files
         find "$ARTIFACTS_DIR" -maxdepth 1 -type f ! -name "$ZIP_NAME" ! -name "${OP_MODEL}.txt" -delete
     
         ZIP_SIZE=$(stat -c%s "$ARTIFACTS_DIR/$ZIP_NAME" | numfmt --to=iec-i --suffix=B)
         
-        echo "============================================"
-        echo "📦 Package Created"
-        echo "============================================"
-        echo "Filename: $ZIP_NAME"
-        echo "Size: $ZIP_SIZE"
-        echo "Location: $ARTIFACTS_DIR"
-        echo "============================================"
-        
-        # ===== Write output =====
-        printf "zip_name=%s\n" "$ZIP_NAME" >> "$GITHUB_OUTPUT"
-        
         echo "✅ Kernel ZIP created successfully"
+        echo "Package: $ZIP_NAME"
+        echo "Size: $ZIP_SIZE"
+        
+        printf "zip_name=%s\n" "$ZIP_NAME" >> "$GITHUB_OUTPUT"
         echo "::endgroup::"
-    
+
     - name: Final Build Summary
       if: always()
       shell: bash
@@ -1301,3 +1290,5 @@ runs:
         echo "✅ Build completed successfully!"
         echo ""
         echo "::endgroup::"
+
+
