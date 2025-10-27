@@ -978,73 +978,77 @@ runs:
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         cd "$ARTIFACTS_DIR"
         
-        {
-          echo "kernel_version=${{ env.KERNEL_FULL_VER }}"
-          echo "sukisu_version=${SUKISUVER:-unknown}"
-          echo "susfs_version=${SUSVER:-unknown}"
-        } >> "$GITHUB_OUTPUT"
+        printf "kernel_version=%s\n" "${{ env.KERNEL_FULL_VER }}" >> "$GITHUB_OUTPUT"
+        printf "sukisu_version=%s\n" "${SUKISUVER:-unknown}" >> "$GITHUB_OUTPUT"
+        printf "susfs_version=%s\n" "${SUSVER:-unknown}" >> "$GITHUB_OUTPUT"
     
     - name: Collect Build Stats / Validate Image
       id: collect_stats
       shell: bash
       run: |
         set -euo pipefail
-        echo "::group::Collect stats"
+        echo "::group::Collect build statistics"
+        
         KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
         COMMON="$KERNEL_PATH/common"
         OUT="$COMMON/out"
         IMG="$OUT/arch/arm64/boot/Image"
         
-        # Count warnings (no stdout output)
+        # ===== Count warnings =====
         if [ -f "$COMMON/build.log" ]; then
           WARNINGS_COUNT=$(grep -c -i -E 'warning:' "$COMMON/build.log" || echo "0")
         else
           WARNINGS_COUNT=0
         fi
         
-        # Save to file silently
+        # Save to file for reference
         echo "$WARNINGS_COUNT" > "$OUT/warnings.txt"
         
-        # Get kernel metadata
+        # ===== Get kernel metadata =====
         file "$IMG" > "$OUT/Image.file" 2>&1
         KERNEL_UNAME=$(strings "$IMG" | grep -E 'Linux version.*#' | tail -n1 || echo "Unknown")
         
-        # Validate ARM64 architecture
+        # ===== Validate ARM64 architecture =====
         if ! file "$IMG" | grep -qi 'ARM64'; then
-          echo "::error::Image does not appear to be ARM64:"
+          echo "::error::Image does not appear to be ARM64"
           file "$IMG"
           exit 1
         fi
         
-        # Validate minimum size (6MB threshold)
+        # ===== Validate minimum size (6MB threshold) =====
         MIN_SIZE=$((6*1024*1024))
         ACTUAL_SIZE=$(stat -c %s "$IMG")
+        
         if [ "$ACTUAL_SIZE" -lt "$MIN_SIZE" ]; then
-          echo "::error::Image size $ACTUAL_SIZE < $MIN_SIZE (suspicious)"
+          echo "::error::Image size $ACTUAL_SIZE bytes is less than minimum $MIN_SIZE bytes"
           exit 1
         fi
         
-        # Get SHA256 checksum
+        # ===== Get SHA256 checksum =====
         if [ -f "$OUT/Image.sha256" ]; then
           IMAGE_SHA256=$(cut -d' ' -f1 "$OUT/Image.sha256")
         else
           IMAGE_SHA256=$(sha256sum "$IMG" | awk '{print $1}')
         fi
         
-        # ===== Display Information (logs only) =====
-        echo "Kernel Uname: $KERNEL_UNAME"
-        echo "Image sha256: $IMAGE_SHA256"
+        # ===== Display information (with labels!) =====
+        echo "============================================"
+        echo "📊 Build Statistics"
+        echo "============================================"
+        echo "Kernel version: $KERNEL_UNAME"
+        echo "Image SHA256: $IMAGE_SHA256"
         echo "Image size: $(numfmt --to=iec-i --suffix=B $ACTUAL_SIZE)"
         echo "Build warnings: $WARNINGS_COUNT"
+        echo "============================================"
         
-        # ===== Write GitHub Actions Outputs =====
+        # ===== Write outputs to GitHub Actions =====
         printf "warnings_count=%s\n" "$WARNINGS_COUNT" >> "$GITHUB_OUTPUT"
         printf "image_sha256=%s\n" "$IMAGE_SHA256" >> "$GITHUB_OUTPUT"
         
-        # ===== Write to Environment Variables =====
+        # ===== Write to environment =====
         echo "KERNEL_UNAME=$KERNEL_UNAME" >> "$GITHUB_ENV"
         
-        echo "✅ Stats collected"
+        echo "✅ Statistics collected and validated"
         echo "::endgroup::"
     
     - name: Download and Package ZRAM Module
@@ -1146,9 +1150,11 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        echo "::group::Create kernel ZIP"
+        echo "::group::Create kernel ZIP package"
+        
         CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
         IMAGE_PATH="$CONFIG_DIR/kernel_platform/common/out/arch/arm64/boot/Image"
+        
         if [ ! -f "$IMAGE_PATH" ]; then
           echo "::error::Built Image not found at $IMAGE_PATH"
           exit 1
@@ -1161,45 +1167,137 @@ runs:
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
     
-        echo "Creating flashable zip: $ZIP_NAME"
+        echo "Creating flashable ZIP: $ZIP_NAME"
         zip -r "$ARTIFACTS_DIR/$ZIP_NAME" ./* -x "*.git*" >/dev/null
     
+        # Clean up old files
         find "$ARTIFACTS_DIR" -maxdepth 1 -type f ! -name "$ZIP_NAME" ! -name "${OP_MODEL}.txt" -delete
     
         ZIP_SIZE=$(stat -c%s "$ARTIFACTS_DIR/$ZIP_NAME" | numfmt --to=iec-i --suffix=B)
-        echo "ZIP size: $ZIP_SIZE"
         
-        echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
-        echo "✅ Kernel ZIP created: $ZIP_NAME ($ZIP_SIZE)"
+        echo "============================================"
+        echo "📦 Package Created"
+        echo "============================================"
+        echo "Filename: $ZIP_NAME"
+        echo "Size: $ZIP_SIZE"
+        echo "Location: $ARTIFACTS_DIR"
+        echo "============================================"
+        
+        # ===== Write output =====
+        printf "zip_name=%s\n" "$ZIP_NAME" >> "$GITHUB_OUTPUT"
+        
+        echo "✅ Kernel ZIP created successfully"
         echo "::endgroup::"
     
-    - name: Upload ZRAM Module
-      if: ${{ inputs.enable_zram == 'true' && steps.zram_find.outputs.upload == 'true' }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: ZRAM-Module_${{ env.KERNEL_VER }}_${{ env.OP_MODEL }}
-        path: ZRAM-Module/*
-    
     - name: Final Build Summary
+      if: always()
       shell: bash
       run: |
         set -euo pipefail
-        {
-          echo "### 🎉 Build Summary"
-          echo ""
-          echo "- Model: ${OP_MODEL}"
-          echo "- SoC: ${OP_SOC}"
-          echo "- Android: ${{ env.ANDROID_VER }}"
-          echo "- Kernel: ${{ env.KERNEL_FULL_VER }}"
-          echo "- SukiSU: ${SUKISUVER:-unknown}"
-          echo "- SUSFS: ${SUSVER:-unknown}"
-          echo "- Hook: ${{ inputs.hook }}"
-          echo "- Optimization: ${{ inputs.optimize_level }}"
-          echo "- Clang: ${CLANG_VERSION}"
-          echo "- SHA256: ${{ steps.collect_stats.outputs.image_sha256 }}"
-          echo "- Warnings: ${{ steps.collect_stats.outputs.warnings_count }}"
-          echo "- Package: ${{ steps.create_zip.outputs.zip_name }}"
-        } | tee summary.txt
-        if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-          cat summary.txt >> "$GITHUB_STEP_SUMMARY"
+        echo "::group::📋 Final Build Summary"
+        
+        BUILD_START="${{ env.BUILD_START }}"
+        BUILD_END="${{ env.BUILD_END }}"
+        
+        if [ -n "$BUILD_START" ] && [ -n "$BUILD_END" ]; then
+          BUILD_TIME=$((BUILD_END - BUILD_START))
+          BUILD_MINUTES=$((BUILD_TIME / 60))
+          BUILD_SECONDS=$((BUILD_TIME % 60))
+        else
+          BUILD_MINUTES="N/A"
+          BUILD_SECONDS=""
         fi
+        
+        echo "╔════════════════════════════════════════════════════════════════╗"
+        echo "║                    🎉 BUILD SUMMARY                            ║"
+        echo "╠════════════════════════════════════════════════════════════════╣"
+        echo "║ Device Configuration                                           ║"
+        echo "╠════════════════════════════════════════════════════════════════╣"
+        echo "║ Model:              ${OP_MODEL:-N/A}"
+        echo "║ SoC:                ${OP_SOC:-N/A}"
+        echo "║ Branch:             ${OP_BRANCH:-N/A}"
+        echo "╠════════════════════════════════════════════════════════════════╣"
+        echo "║ Kernel Information                                             ║"
+        echo "╠════════════════════════════════════════════════════════════════╣"
+        echo "║ Version:            ${{ env.KERNEL_FULL_VER }}"
+        echo "║ Android Version:    ${{ env.ANDROID_VER }}"
+        echo "║ Kernel Version:     ${{ env.KERNEL_VER }}"
+        echo "║ Local Version:      ${CUSTOM_LOCALVERSION:-N/A}"
+        echo "╠════════════════════════════════════════════════════════════════╣"
+        echo "║ SukiSU Ultra & SUSFS                                           ║"
+        echo "╠════════════════════════════════════════════════════════════════╣"
+        echo "║ SukiSU Version:     ${SUKISUVER:-N/A}"
+        echo "║ SukiSU API:         ${KSU_API_VERSION:-N/A}"
+        echo "║ SUSFS Version:      ${SUSVER:-N/A}"
+        echo "║ SUSFS Commit:       ${SUSFS_COMMIT_SHA:0:8}"
+        echo "╠════════════════════════════════════════════════════════════════╣"
+        echo "║ Build Configuration                                            ║"
+        echo "╠════════════════════════════════════════════════════════════════╣"
+        echo "║ Hook Type:          ${{ inputs.hook }}"
+        echo "║ Optimization:       ${{ inputs.optimize_level }}"
+        echo "║ ZRAM Enabled:       ${{ inputs.enable_zram }}"
+        echo "║ LSM (BBG):          ${{ inputs.lsm }}"
+        echo "║ Clang:              ${CLANG_VERSION:-N/A}"
+        echo "╠════════════════════════════════════════════════════════════════╣"
+        echo "║ Build Statistics                                               ║"
+        echo "╠════════════════════════════════════════════════════════════════╣"
+        
+        if [ "$BUILD_MINUTES" != "N/A" ]; then
+          echo "║ Build Time:         ${BUILD_MINUTES}m ${BUILD_SECONDS}s"
+        else
+          echo "║ Build Time:         N/A"
+        fi
+        
+        echo "║ Warnings:           ${{ steps.collect_stats.outputs.warnings_count }}"
+        echo "║ Image SHA256:       ${{ steps.collect_stats.outputs.image_sha256 }}"
+        echo "╠════════════════════════════════════════════════════════════════╣"
+        echo "║ Output Files                                                   ║"
+        echo "╠════════════════════════════════════════════════════════════════╣"
+        echo "║ ZIP Package:        ${{ steps.create_zip.outputs.zip_name }}"
+        
+        CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
+        ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
+        
+        if [ -f "$ARTIFACTS_DIR/${{ steps.create_zip.outputs.zip_name }}" ]; then
+          ZIP_SIZE=$(stat -c%s "$ARTIFACTS_DIR/${{ steps.create_zip.outputs.zip_name }}" | numfmt --to=iec-i --suffix=B)
+          echo "║ ZIP Size:           $ZIP_SIZE"
+        fi
+        
+        IMAGE_PATH="$CONFIG_DIR/kernel_platform/common/out/arch/arm64/boot/Image"
+        if [ -f "$IMAGE_PATH" ]; then
+          IMAGE_SIZE=$(stat -c%s "$IMAGE_PATH" | numfmt --to=iec-i --suffix=B)
+          echo "║ Image Size:         $IMAGE_SIZE"
+        fi
+        
+        echo "╠════════════════════════════════════════════════════════════════╣"
+        echo "║ Cache Statistics                                               ║"
+        echo "╠════════════════════════════════════════════════════════════════╣"
+        
+        if command -v ccache >/dev/null 2>&1; then
+          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+          CCACHE_STATS=$(ccache -s 2>/dev/null || echo "N/A")
+          
+          CACHE_HIT=$(echo "$CCACHE_STATS" | grep -i "cache hit" | head -n1 | awk '{print $NF}' || echo "N/A")
+          CACHE_MISS=$(echo "$CCACHE_STATS" | grep -i "cache miss" | head -n1 | awk '{print $NF}' || echo "N/A")
+          
+          echo "║ Cache Hits:         $CACHE_HIT"
+          echo "║ Cache Misses:       $CACHE_MISS"
+        else
+          echo "║ ccache:             Not available"
+        fi
+        
+        echo "╠════════════════════════════════════════════════════════════════╣"
+        echo "║ System Resources                                               ║"
+        echo "╠════════════════════════════════════════════════════════════════╣"
+        
+        DISK_USAGE=$(df -h "$GITHUB_WORKSPACE" | awk 'NR==2 {print $5}')
+        MEMORY_USAGE=$(free -h | awk 'NR==2 {print $3 "/" $2}')
+        
+        echo "║ Disk Usage:         $DISK_USAGE"
+        echo "║ Memory Usage:       $MEMORY_USAGE"
+        echo "╚════════════════════════════════════════════════════════════════╝"
+        
+        echo ""
+        echo "✅ Build completed successfully!"
+        echo ""
+        echo "::endgroup::"
