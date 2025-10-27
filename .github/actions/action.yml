@@ -41,9 +41,9 @@ outputs:
   image_sha256:
     description: 'Kernel image SHA256'
     value: ${{ steps.collect_stats.outputs.image_sha256 }}
-  warnings_count: 
+  warnings_count:
     description: 'Build warnings count'
-    value: ${{ steps.collect_stats.outputs.warnings_count }}  # ✅ Matches the actual output name
+    value: ${{ steps.collect_stats.outputs.warnings_count }}
   zip_name:
     description: 'Created ZIP filename'
     value: ${{ steps.create_zip.outputs.zip_name }}
@@ -228,17 +228,14 @@ runs:
         echo "Using AnyKernel3 branch: $ANYKERNEL_BRANCH"
         echo "Using SUSFS branch: $SUSFS_BRANCH"
         
-        # Clone repositories
         git clone --depth=1 https://github.com/Bouteillepleine/AnyKernel3.git -b "$ANYKERNEL_BRANCH"
         git clone https://gitlab.com/simonpunk/susfs4ksu.git -b "$SUSFS_BRANCH" --depth=1
         git clone --depth=1 https://github.com/ShirkNeko/SukiSU_patch.git
         
-        # Get SUSFS commit and version info
         cd susfs4ksu
         SUSFS_COMMIT_SHA=$(git rev-parse HEAD)
         echo "SUSFS_COMMIT_SHA=$SUSFS_COMMIT_SHA" >> $GITHUB_ENV
         
-        # Extract SUSFS version early
         if [ -f "kernel_patches/include/linux/susfs.h" ]; then
           SUSFS_VERSION=$(grep '#define SUSFS_VERSION' kernel_patches/include/linux/susfs.h | awk -F'"' '{print $2}')
           echo "SUSFS_VERSION=$SUSFS_VERSION" >> $GITHUB_ENV
@@ -341,21 +338,17 @@ runs:
         fi
     
         echo "[+] Fetching KSU API version..."
-        # Try to get API version from local Makefile first
         if [ -f "kernel/Makefile" ]; then
           KSU_API_VERSION=$(grep -m1 "KSU_VERSION_API :=" kernel/Makefile | awk -F'= ' '{print $2}' | tr -d '[:space:]' || echo "")
           echo "Found local API version: $KSU_API_VERSION"
         fi
         
-        # If not found locally or empty, try remote
         if [ -z "$KSU_API_VERSION" ]; then
           echo "Attempting to fetch from remote..."
-          # Try multiple methods to get the API version
           KSU_API_VERSION=$(curl -fsSL --retry 3 --connect-timeout 30 \
             "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/$BRANCH_NAME/kernel/Makefile" 2>/dev/null | \
             grep -m1 "KSU_VERSION_API :=" | awk -F'= ' '{print $2}' | tr -d '[:space:]' || echo "")
           
-          # If still empty, try main branch as fallback
           if [ -z "$KSU_API_VERSION" ]; then
             echo "Trying main branch as fallback..."
             KSU_API_VERSION=$(curl -fsSL --retry 3 --connect-timeout 30 \
@@ -364,17 +357,14 @@ runs:
           fi
         fi
         
-        # Validate and set default if needed
         if [[ -z "$KSU_API_VERSION" ]]; then
           echo "⚠️ Could not fetch API version from any source, using default: 3.1.7"
           KSU_API_VERSION="3.1.7"
         else
-          # Validate version format (should be like 3.1.7)
           if ! [[ "$KSU_API_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "⚠️ Invalid API version format: $KSU_API_VERSION, using default: 3.1.7"
             KSU_API_VERSION="3.1.7"
           else
-            # Check if version is at least 3.1.7
             if [[ "$(printf '%s\n' "$KSU_API_VERSION" "3.1.7" | sort -V | head -n1)" != "3.1.7" ]]; then
               echo "⚠️ API version $KSU_API_VERSION is too old, using minimum: 3.1.7"
               KSU_API_VERSION="3.1.7"
@@ -423,7 +413,6 @@ runs:
         echo "::group::Apply SUSFS patches"
         cd "$CONFIG/kernel_platform"
         
-        # Use already cloned SUSFS repository
         SUSFS_SRC="$GITHUB_WORKSPACE/susfs4ksu"
         if [ ! -d "$SUSFS_SRC" ]; then
           echo "::error::SUSFS source directory not found at $SUSFS_SRC"
@@ -437,7 +426,6 @@ runs:
 
         cd ./common
         
-        # Get SUSFS version (fallback if not set earlier)
         if [ -z "${SUSFS_VERSION:-}" ]; then
           susfs_version=$(grep '#define SUSFS_VERSION' ./include/linux/susfs.h | awk -F'"' '{print $2}')
           echo "SUSFS_VERSION=$susfs_version" >> $GITHUB_ENV
@@ -449,7 +437,6 @@ runs:
         GKI_V="${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}"
         SUBLEVEL=$(grep '^SUBLEVEL *=' Makefile | head -n1 | cut -d= -f2 | tr -d ' ')
 
-        # Fix legacy 5.15 issues
         if [ "$GKI_V" = "android13-5.15" ] && [ "$SUBLEVEL" -lt 123 ]; then
           echo "Fixing legacy 5.15 issues..."
           if curl -Lo fix_5.15.legacy.patch --retry 5 --retry-delay 2 --retry-connrefused \
@@ -460,7 +447,6 @@ runs:
           fi
         fi
 
-        # Apply fake patches for specific kernels
         fake_patched=0
         if [ "$GKI_V" = "android15-6.6" ]; then
           if ! grep -qxF $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' ./fs/proc/task_mmu.c; then
@@ -478,13 +464,11 @@ runs:
           fi
         fi
 
-        # Apply main SUSFS patch
         echo "Applying SUSFS patch..."
         if ! patch -p1 < 50_add_susfs_in_${{ env.SUSFS_KERNEL_BRANCH }}.patch; then
           echo "::warning::SUSFS patch applied with warnings"
         fi
 
-        # Revert fake patches
         if [ "$fake_patched" = 1 ]; then
           if [ "$GKI_V" = "android15-6.6" ]; then
             if grep -qxF $'\tunsigned int nr_subpages = __PAGE_SIZE / PAGE_SIZE;' ./fs/proc/task_mmu.c; then
@@ -499,7 +483,6 @@ runs:
           fi
         fi
 
-        # Apply ptrace patch for kernels < 5.16
         KERNEL_VERSION="${{ env.KERNEL_VER }}"
         MIN_VERSION="5.16"
         if [ "$(printf '%s\n' "$KERNEL_VERSION" "$MIN_VERSION" | sort -V | head -n1)" = "$KERNEL_VERSION" ]; then
@@ -552,7 +535,6 @@ runs:
         if curl -fsSL -o hmbird_patch.patch \
           "https://raw.githubusercontent.com/Numbersf/Action-Build/SukiSU-Ultra/patches/hmbird_patch.patch"; then
           
-          # Add to Makefile if not already present
           if ! grep -q 'hmbird_patch.o' drivers/Makefile; then
             echo 'obj-y += hmbird_patch.o' >> drivers/Makefile
           fi
@@ -711,7 +693,6 @@ runs:
         CONFIG_IP_NF_TARGET_ECN=y
         EOF
     
-        # Add optimization settings based on input
         if [ "${{ inputs.optimize_level }}" = "O3" ]; then
           cat >> "$CONFIG_FILE" << 'EOF'
         # O3 Optimization
@@ -726,7 +707,6 @@ runs:
         EOF
         fi
     
-        # Add LTO and other optimizations
         cat >> "$CONFIG_FILE" << 'EOF'
         CONFIG_LTO_CLANG_THIN=y
         CONFIG_LTO_CLANG=y
@@ -748,7 +728,6 @@ runs:
           echo "CONFIG_BBG=y" >> "$CONFIG_FILE"
         fi
         
-        # Add SCHED_EXT config for 6.6 kernels
         if [ "${{ env.KERNEL_VER }}" = "6.6" ]; then
           echo "CONFIG_SCHED_CLASS_EXT=y" >> "$CONFIG_FILE"
         fi
@@ -838,7 +817,6 @@ runs:
           sed -i 's/scm_version="$(scm_version --short)"/scm_version=""/' scripts/setlocalversion
         fi
         
-        # Optimization level is already set in defconfig, just verify
         if [ "${{ inputs.optimize_level }}" = "O3" ]; then
           scripts/config --file "$OUT/.config" -d CC_OPTIMIZE_FOR_PERFORMANCE
           scripts/config --file "$OUT/.config" -e CC_OPTIMIZE_FOR_PERFORMANCE_O3
@@ -849,7 +827,6 @@ runs:
           KCFLAGS_EXTRA="-O2"
         fi
         
-        # Enable LTO
         scripts/config --file "$OUT/.config" -e LTO_CLANG_THIN
         scripts/config --file "$OUT/.config" -e LTO_CLANG
         
@@ -904,24 +881,20 @@ runs:
         OUT="$COMMON/out"
         IMG="$OUT/arch/arm64/boot/Image"
         
-        # Count warnings
         WARNINGS_COUNT=$(grep -i -E 'warning:' "$COMMON/build.log" | wc -l || echo "0")
         echo "$WARNINGS_COUNT" > "$OUT/warnings.txt"
         
-        # Get file info
         file "$IMG" > "$OUT/Image.file"
         KERNEL_UNAME=$(strings "$IMG" | grep -E 'Linux version.*#' | tail -n1)
         echo "Kernel Uname: $KERNEL_UNAME"
         echo "KERNEL_UNAME=$KERNEL_UNAME" >> "$GITHUB_ENV"
         
-        # Validate architecture
         if ! file "$IMG" | grep -qi 'ARM64'; then
           echo "::error::Image does not appear to be ARM64:"
           file "$IMG"
           exit 1
         fi
         
-        # Validate size
         MIN_SIZE=$((6*1024*1024))
         ACTUAL_SIZE=$(stat -c %s "$IMG")
         if [ "$ACTUAL_SIZE" -lt "$MIN_SIZE" ]; then
@@ -934,7 +907,6 @@ runs:
         echo "Image size: $(numfmt --to=iec-i --suffix=B $ACTUAL_SIZE)"
         echo "Build warnings: $WARNINGS_COUNT"
         
-        # Set outputs properly
         echo "warnings_count=$WARNINGS_COUNT" >> "$GITHUB_OUTPUT"
         echo "image_sha256=$IMAGE_SHA256" >> "$GITHUB_OUTPUT"
         echo "✅ Stats collected"
