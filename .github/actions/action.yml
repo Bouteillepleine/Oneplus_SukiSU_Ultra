@@ -995,24 +995,30 @@ runs:
         OUT="$COMMON/out"
         IMG="$OUT/arch/arm64/boot/Image"
         
+        # Count warnings
         if [ -f "$COMMON/build.log" ]; then
           WARNINGS_COUNT=$(grep -c -i -E 'warning:' "$COMMON/build.log" || echo "0")
         else
           WARNINGS_COUNT=0
         fi
-        printf "%s\n" "$WARNINGS_COUNT" > "$OUT/warnings.txt"
         
+        # Save warnings to file (no stdout output)
+        echo "$WARNINGS_COUNT" > "$OUT/warnings.txt"
+        
+        # Get kernel info
         file "$IMG" > "$OUT/Image.file" 2>&1
         KERNEL_UNAME=$(strings "$IMG" | grep -E 'Linux version.*#' | tail -n1 || echo "Unknown")
         echo "Kernel Uname: $KERNEL_UNAME"
         echo "KERNEL_UNAME=$KERNEL_UNAME" >> "$GITHUB_ENV"
         
+        # Validate ARM64
         if ! file "$IMG" | grep -qi 'ARM64'; then
           echo "::error::Image does not appear to be ARM64:"
           file "$IMG"
           exit 1
         fi
         
+        # Validate size
         MIN_SIZE=$((6*1024*1024))
         ACTUAL_SIZE=$(stat -c %s "$IMG")
         if [ "$ACTUAL_SIZE" -lt "$MIN_SIZE" ]; then
@@ -1020,20 +1026,21 @@ runs:
           exit 1
         fi
         
+        # Get SHA256
         if [ -f "$OUT/Image.sha256" ]; then
           IMAGE_SHA256=$(cut -d' ' -f1 "$OUT/Image.sha256")
         else
-          IMAGE_SHA256="not_available"
+          IMAGE_SHA256=$(sha256sum "$IMG" | awk '{print $1}')
         fi
         
+        # Display stats (these go to logs, not outputs)
         echo "Image sha256: $IMAGE_SHA256"
         echo "Image size: $(numfmt --to=iec-i --suffix=B $ACTUAL_SIZE)"
         echo "Build warnings: $WARNINGS_COUNT"
         
-        {
-          echo "warnings_count=$WARNINGS_COUNT"
-          echo "image_sha256=$IMAGE_SHA256"
-        } >> "$GITHUB_OUTPUT"
+        # Write outputs using printf (safer than echo)
+        printf "warnings_count=%s\n" "$WARNINGS_COUNT" >> "$GITHUB_OUTPUT"
+        printf "image_sha256=%s\n" "$IMAGE_SHA256" >> "$GITHUB_OUTPUT"
         
         echo "✅ Stats collected"
         echo "::endgroup::"
