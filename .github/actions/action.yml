@@ -995,30 +995,28 @@ runs:
         OUT="$COMMON/out"
         IMG="$OUT/arch/arm64/boot/Image"
         
-        # Count warnings
+        # Count warnings (no stdout output)
         if [ -f "$COMMON/build.log" ]; then
           WARNINGS_COUNT=$(grep -c -i -E 'warning:' "$COMMON/build.log" || echo "0")
         else
           WARNINGS_COUNT=0
         fi
         
-        # Save warnings to file (no stdout output)
+        # Save to file silently
         echo "$WARNINGS_COUNT" > "$OUT/warnings.txt"
         
-        # Get kernel info
+        # Get kernel metadata
         file "$IMG" > "$OUT/Image.file" 2>&1
         KERNEL_UNAME=$(strings "$IMG" | grep -E 'Linux version.*#' | tail -n1 || echo "Unknown")
-        echo "Kernel Uname: $KERNEL_UNAME"
-        echo "KERNEL_UNAME=$KERNEL_UNAME" >> "$GITHUB_ENV"
         
-        # Validate ARM64
+        # Validate ARM64 architecture
         if ! file "$IMG" | grep -qi 'ARM64'; then
           echo "::error::Image does not appear to be ARM64:"
           file "$IMG"
           exit 1
         fi
         
-        # Validate size
+        # Validate minimum size (6MB threshold)
         MIN_SIZE=$((6*1024*1024))
         ACTUAL_SIZE=$(stat -c %s "$IMG")
         if [ "$ACTUAL_SIZE" -lt "$MIN_SIZE" ]; then
@@ -1026,21 +1024,25 @@ runs:
           exit 1
         fi
         
-        # Get SHA256
+        # Get SHA256 checksum
         if [ -f "$OUT/Image.sha256" ]; then
           IMAGE_SHA256=$(cut -d' ' -f1 "$OUT/Image.sha256")
         else
           IMAGE_SHA256=$(sha256sum "$IMG" | awk '{print $1}')
         fi
         
-        # Display stats (these go to logs, not outputs)
+        # ===== Display Information (logs only) =====
+        echo "Kernel Uname: $KERNEL_UNAME"
         echo "Image sha256: $IMAGE_SHA256"
         echo "Image size: $(numfmt --to=iec-i --suffix=B $ACTUAL_SIZE)"
         echo "Build warnings: $WARNINGS_COUNT"
         
-        # Write outputs using printf (safer than echo)
+        # ===== Write GitHub Actions Outputs =====
         printf "warnings_count=%s\n" "$WARNINGS_COUNT" >> "$GITHUB_OUTPUT"
         printf "image_sha256=%s\n" "$IMAGE_SHA256" >> "$GITHUB_OUTPUT"
+        
+        # ===== Write to Environment Variables =====
+        echo "KERNEL_UNAME=$KERNEL_UNAME" >> "$GITHUB_ENV"
         
         echo "✅ Stats collected"
         echo "::endgroup::"
