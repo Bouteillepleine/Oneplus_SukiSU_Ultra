@@ -866,9 +866,13 @@ runs:
         CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         cd "$ARTIFACTS_DIR"
-        echo "kernel_version=${{ env.KERNEL_FULL_VER }}" >> "$GITHUB_OUTPUT"
-        echo "sukisu_version=${SUKISUVER:-unknown}" >> "$GITHUB_OUTPUT"
-        echo "susfs_version=${SUSVER:-unknown}" >> "$GITHUB_OUTPUT"
+        
+        # Write outputs in a single block to avoid stray output
+        {
+          echo "kernel_version=${{ env.KERNEL_FULL_VER }}"
+          echo "sukisu_version=${SUKISUVER:-unknown}"
+          echo "susfs_version=${SUSVER:-unknown}"
+        } >> "$GITHUB_OUTPUT"
 
     - name: Collect Build Stats / Validate Image
       id: collect_stats
@@ -881,9 +885,11 @@ runs:
         OUT="$COMMON/out"
         IMG="$OUT/arch/arm64/boot/Image"
         
+        # Count warnings and save to file
         WARNINGS_COUNT=$(grep -i -E 'warning:' "$COMMON/build.log" | wc -l || echo "0")
         echo "$WARNINGS_COUNT" > "$OUT/warnings.txt"
         
+        # Validate image
         file "$IMG" > "$OUT/Image.file"
         KERNEL_UNAME=$(strings "$IMG" | grep -E 'Linux version.*#' | tail -n1)
         echo "Kernel Uname: $KERNEL_UNAME"
@@ -902,12 +908,15 @@ runs:
           exit 1
         fi
         
+        # Get SHA256
         IMAGE_SHA256=$(cut -d' ' -f1 "$OUT/Image.sha256")
+        
+        # Display info
         echo "Image sha256: $IMAGE_SHA256"
         echo "Image size: $(numfmt --to=iec-i --suffix=B $ACTUAL_SIZE)"
         echo "Build warnings: $WARNINGS_COUNT"
         
-        # Write outputs properly
+        # Write outputs in a single block to prevent stray output
         {
           echo "warnings_count=$WARNINGS_COUNT"
           echo "image_sha256=$IMAGE_SHA256"
@@ -1066,7 +1075,7 @@ runs:
           echo "- **Optimization**: ${{ inputs.optimize_level }}"
           echo "- **Clang**: ${CLANG_VERSION}"
           echo "- **SHA256**: \`${{ steps.collect_stats.outputs.image_sha256 }}\`"
-          echo "- **Warnings**: ${{ steps.collect_stats.outputs.warnings_count }}"
+          echo "- **Warnings**: ${{ steps.collect_stats.outputs.warnings_count }}\`"
           echo "- **Package**: \`${{ steps.create_zip.outputs.zip_name }}\`"
         } | tee summary.txt
         cat summary.txt >> "$GITHUB_STEP_SUMMARY"
