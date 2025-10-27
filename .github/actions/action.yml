@@ -870,7 +870,7 @@ runs:
         echo "sukisu_version=${SUKISUVER:-unknown}" >> "$GITHUB_OUTPUT"
         echo "susfs_version=${SUSVER:-unknown}" >> "$GITHUB_OUTPUT"
 
-        - name: Collect Build Stats / Validate Image
+    - name: Collect Build Stats / Validate Image
       id: collect_stats
       shell: bash
       run: |
