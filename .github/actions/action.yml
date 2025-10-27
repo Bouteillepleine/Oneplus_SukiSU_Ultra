@@ -41,9 +41,9 @@ outputs:
   image_sha256:
     description: 'Kernel image SHA256'
     value: ${{ steps.collect_stats.outputs.image_sha256 }}
-  warnings:
+  warnings_count: 
     description: 'Build warnings count'
-    value: ${{ steps.collect_stats.outputs.warnings }}
+    value: ${{ steps.collect_stats.outputs.warnings_count }}  # ✅ Matches the actual output name
   zip_name:
     description: 'Created ZIP filename'
     value: ${{ steps.create_zip.outputs.zip_name }}
@@ -934,6 +934,7 @@ runs:
         echo "Image size: $(numfmt --to=iec-i --suffix=B $ACTUAL_SIZE)"
         echo "Build warnings: $WARNINGS_COUNT"
         
+        # Set outputs properly
         echo "warnings_count=$WARNINGS_COUNT" >> "$GITHUB_OUTPUT"
         echo "image_sha256=$IMAGE_SHA256" >> "$GITHUB_OUTPUT"
         echo "✅ Stats collected"
