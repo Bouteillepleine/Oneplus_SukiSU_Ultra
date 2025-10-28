@@ -1013,8 +1013,8 @@ runs:
         echo "::group::ccache statistics"
         ccache -s || true
         echo "::endgroup::"
-    
-        - name: Save Build Metadata
+
+    - name: Save Build Metadata
       id: save_metadata
       shell: bash
       run: |
