@@ -2,9 +2,7 @@ name: 'Build OnePlus Kernel with SukiSU Ultra'
 
 inputs:
   op_config_json:
-    description: |
-      JSON string containing full device config.
-      Required fields: model, soc, branch, manifest     
+    description: 'JSON string containing full device config'
     required: true
   ksu_meta:
     description: 'SukiSU Ultra metadata (branch/tag/hash)'
@@ -25,12 +23,15 @@ inputs:
   optimize_level:
     description: 'Optimization level (O2/O3)'
     required: false
-    default: 'O2' 
+    default: 'O2'
   github_token:
     description: 'GitHub token for API access'
     required: true
 
 outputs:
+  build_matrix:
+    description: 'JSON array of successful builds'
+    value: ${{ steps.save_metadata.outputs.build_matrix }}
   kernel_version:
     description: 'Built kernel version'
     value: ${{ steps.save_metadata.outputs.kernel_version }}
@@ -46,9 +47,6 @@ outputs:
   zip_name:
     description: 'Created ZIP filename'
     value: ${{ steps.create_zip.outputs.zip_name }}
-  build_info:
-    description: 'Complete build information JSON'
-    value: ${{ steps.save_metadata.outputs.build_info }}
 
 runs:
   using: composite
@@ -72,7 +70,6 @@ runs:
         branch="$OP_BRANCH"
         manifest="$OP_MANIFEST"
         optimize='${{ inputs.optimize_level }}'
-        swap_size='${{ inputs.swap_size }}'
 
         [[ -n "$model" ]] || { echo "::error::Input 'model' cannot be empty"; exit 1; }
         [[ -n "$soc" ]] || { echo "::error::Input 'soc' cannot be empty"; exit 1; }
@@ -81,10 +78,10 @@ runs:
 
         if ! [[ "$soc" =~ ^[A-Za-z0-9_-]+$ ]]; then
           echo "::error::Input 'soc' contains invalid characters"; exit 1
-        fi
+        fi    
         if ! [[ "$branch" =~ ^[A-Za-z0-9._/-]+$ ]]; then
           echo "::error::Input 'branch' contains invalid characters"; exit 1
-        fi
+        fi    
         if [[ "$manifest" == http*://* ]]; then
           if ! [[ "$manifest" =~ ^https:// ]]; then
             echo "::error::Manifest URL must be HTTPS"; exit 1
@@ -104,9 +101,6 @@ runs:
           O2|O3) ;;
           *) echo "::error::optimize_level must be O2 or O3; got '$optimize'"; exit 1 ;;
         esac
-        if ! [[ "$swap_size" =~ ^[0-9]+$ ]] || [ "$swap_size" -lt 1 ] || [ "$swap_size" -gt 10 ]; then
-          echo "::error::swap_size must be between 1 and 10 GB"; exit 1
-        fi
         echo "✅ Input validation passed"
         echo "::endgroup::"
 
@@ -119,8 +113,7 @@ runs:
         sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
           git curl ca-certificates build-essential clang lld flex bison \
           libelf-dev libssl-dev libncurses-dev zlib1g-dev liblz4-tool \
-          libxml2-utils rsync unzip dwarves file python3 ccache jq bc \
-          parallel
+          libxml2-utils rsync unzip dwarves file python3 ccache jq bc
         sudo apt-get clean
         echo "✅ Dependencies installed"
         echo "::endgroup::"
@@ -137,7 +130,6 @@ runs:
           chmod +x "$REPO"
         fi
         echo "REPO=$REPO" >> "$GITHUB_ENV"
-        
         # Setup build cache directory
         mkdir -p "$HOME/.cache/kernel-build"
         echo "KERNEL_BUILD_CACHE=$HOME/.cache/kernel-build" >> "$GITHUB_ENV"
@@ -146,7 +138,7 @@ runs:
       shell: bash
       run: |
         sudo swapoff -a || true
-        sudo fallocate -l 6G /swapfile
+        sudo fallocate -l 8G /swapfile
         sudo chmod 600 /swapfile
         sudo mkswap /swapfile
         sudo swapon /swapfile
@@ -164,65 +156,30 @@ runs:
       run: |
         set -euo pipefail
         echo "::group::Initialize kernel source"
-
+        echo "Creating folder for configuration: $CONFIG"
         mkdir -p "$CONFIG"
         cd "$CONFIG"
-
+        echo "Initializing and syncing kernel source..."
         if [[ "$OP_MANIFEST" == https://* ]]; then
           mkdir -p .repo/manifests
-          for i in {1..5}; do
-            if curl --fail --show-error --location --proto '=https' \
-                   --retry 3 --retry-delay 5 --connect-timeout 30 \
-                   "$OP_MANIFEST" -o .repo/manifests/temp_manifest.xml; then
-              break
-            fi
-            echo "::warning::Manifest download attempt $i failed"
-            sleep 10
-          done
-          if [ ! -f .repo/manifests/temp_manifest.xml ]; then
-            echo "::error::Failed to download manifest after 5 attempts"
-            exit 1
-          fi
-          "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git \
-            -b "$OP_BRANCH" -m temp_manifest.xml \
-            --repo-rev=v2.16 --depth=1 --no-clone-bundle --no-tags
+          curl --fail --show-error --location --proto '=https' "$OP_MANIFEST" -o .repo/manifests/temp_manifest.xml
+          "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git -b oneplus/sm8650 -m temp_manifest.xml --repo-rev=v2.16 --depth=1 --no-clone-bundle --no-tags
         else
-          "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git \
-            -b "$OP_BRANCH" -m "$OP_MANIFEST" \
-            --repo-rev=v2.16 --depth=1 --no-clone-bundle --no-tags
+          "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git -b "$OP_BRANCH" -m "$OP_MANIFEST" --repo-rev=v2.16 --depth=1 --no-clone-bundle --no-tags
         fi
-
+        "$REPO" --version
         success=false
-        for attempt in 1 2 3 4 5; do
-          echo "Sync attempt $attempt/5..."
-          if "$REPO" sync -c --no-clone-bundle --no-tags \
-             --optimized-fetch --prune \
-             -j"$(nproc --all)" --fail-fast 2>&1 | tee sync.log; then
+        for i in 1 2 3; do
+          if "$REPO" sync -c --no-clone-bundle --no-tags --optimized-fetch \
+             -j"$(nproc --all)" --fail-fast; then
             success=true
             break
           fi
-          echo "::warning::Sync attempt $attempt failed"
-          "$REPO" forall -c 'git clean -fdx' || true
+          echo "⚠️ repo sync attempt $i failed; retrying..."
           sleep 30
         done
-
-        if ! $success; then
-          echo "::error::repo sync failed after 5 attempts"
-          echo "::group::Sync log"
-          cat sync.log || echo "No sync log available"
-          echo "::endgroup::"
-          exit 1
-        fi
-
-        if [ ! -f "kernel_platform/common/Makefile" ]; then
-          echo "::error::Sync completed but kernel source missing"
-          echo "::group::Directory structure"
-          find . -maxdepth 3 -type d
-          echo "::endgroup::"
-          exit 1
-        fi
-
-        echo "✅ Kernel source synced and validated"
+        $success || { echo "::error::repo sync failed after 3 attempts"; exit 1; }
+        echo "✅ Kernel source synced"
         echo "::endgroup::"
 
     - name: Get Kernel Version Info
@@ -302,7 +259,6 @@ runs:
         SUSFS_BRANCH="${{ env.SUSFS_KERNEL_BRANCH }}"
         echo "Using AnyKernel3 branch: $ANYKERNEL_BRANCH"
         echo "Using SUSFS branch: $SUSFS_BRANCH"
-        
         # Clone in parallel
         (
           git clone --depth=1 https://github.com/Bouteillepleine/AnyKernel3.git -b "$ANYKERNEL_BRANCH" &
@@ -1147,8 +1103,8 @@ runs:
           echo "zram.ko file not found in build output"
           echo "upload=false" >> "$GITHUB_OUTPUT"
         fi
-        echo "::endgroup::"
-
+        echo "::endgroup::"  
+    
     - name: Download SUSFS Module from CI
       shell: bash
       continue-on-error: true
