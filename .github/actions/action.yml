@@ -104,6 +104,45 @@ runs:
         echo "✅ Input validation passed"
         echo "::endgroup::"
 
+    - name: Maximize Build Space
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Maximize build space"
+        echo "Initial disk usage:"
+        df -h
+        
+        # Remove large unnecessary packages and tools
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /usr/local/share/boost
+        sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/hostedtoolcache
+        sudo rm -rf /usr/share/swift
+        sudo rm -rf /usr/local/.ghcup
+        sudo rm -rf /usr/lib/jvm
+        sudo rm -rf /usr/local/share/powershell
+        sudo rm -rf /opt/az
+        
+        # Clean package manager
+        sudo apt-get clean
+        sudo apt-get autoremove -y
+        sudo apt-get autoclean
+        
+        # Remove docker images and containers
+        docker system prune -af --volumes || true
+        
+        # Remove snap packages
+        sudo snap list | grep -v "^Name" | awk '{print $1}' | xargs -n1 sudo snap remove || true
+        
+        # Clear package lists
+        sudo rm -rf /var/lib/apt/lists/*
+        
+        echo "Final disk usage:"
+        df -h
+        echo "::endgroup::"
+
     - name: Install Minimal Dependencies
       shell: bash
       run: |
@@ -115,6 +154,7 @@ runs:
           libelf-dev libssl-dev libncurses-dev zlib1g-dev liblz4-tool \
           libxml2-utils rsync unzip dwarves file python3 ccache jq bc
         sudo apt-get clean
+        sudo rm -rf /var/lib/apt/lists/*
         echo "✅ Dependencies installed"
         echo "::endgroup::"
 
@@ -138,7 +178,7 @@ runs:
       shell: bash
       run: |
         sudo swapoff -a || true
-        sudo fallocate -l 8G /swapfile
+        sudo fallocate -l 4G /swapfile  # Reduced from 8G
         sudo chmod 600 /swapfile
         sudo mkswap /swapfile
         sudo swapon /swapfile
@@ -148,7 +188,9 @@ runs:
       shell: bash
       run: |
         echo "CCACHE_DIR=$HOME/.ccache_${{ env.CONFIG }}" >> "$GITHUB_ENV"
-        echo "CCACHE_MAXSIZE=5G" >> "$GITHUB_ENV"
+        echo "CCACHE_MAXSIZE=2G" >> "$GITHUB_ENV"  # Reduced from 5G
+        echo "CCACHE_COMPRESS=true" >> "$GITHUB_ENV"
+        echo "CCACHE_COMPRESSLEVEL=6" >> "$GITHUB_ENV"
         mkdir -p "$HOME/.ccache_${{ env.CONFIG }}"
 
     - name: Initialize and Sync Kernel Source
@@ -180,6 +222,29 @@ runs:
         done
         $success || { echo "::error::repo sync failed after 3 attempts"; exit 1; }
         echo "✅ Kernel source synced"
+        echo "::endgroup::"
+
+    - name: Post-Sync Cleanup
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Post-sync cleanup"
+        cd "$CONFIG/kernel_platform"
+        
+        # Remove unnecessary .git directories to save space
+        find . -type d -name ".git" -not -path "./common/.git" -not -path "./msm-kernel/.git" | xargs rm -rf
+        
+        # Remove unnecessary prebuilts
+        rm -rf prebuilts/gcc || true
+        rm -rf prebuilts/misc || true
+        rm -rf prebuilts/kernel-build-tools || true
+        
+        # Remove documentation and test files
+        find . -type f \( -name "*.md" -o -name "*.txt" -o -name "*.rst" \) -not -path "./common/*" -delete 2>/dev/null || true
+        find . -type d -name "test" -o -name "tests" -o -name "samples" | xargs rm -rf 2>/dev/null || true
+        
+        echo "Disk usage after cleanup:"
+        df -h
         echo "::endgroup::"
 
     - name: Get Kernel Version Info
@@ -240,9 +305,12 @@ runs:
         export CCACHE_BASEDIR="${{ github.workspace }}"
         export CCACHE_NOHASHDIR="true"
         export CCACHE_HARDLINK="true"
+        export CCACHE_COMPRESS="${{ env.CCACHE_COMPRESS }}"
+        export CCACHE_COMPRESSLEVEL="${{ env.CCACHE_COMPRESSLEVEL }}"
         mkdir -p "$CCACHE_DIR"
         ccache -M "$CCACHE_MAXSIZE"
         ccache -o compression=true
+        ccache -o compression_level="${{ env.CCACHE_COMPRESSLEVEL }}"
         echo "ccache status (pre-build):"
         ccache -s
         if [ "${{ steps.ccache-restore.outputs.cache-hit }}" = "true" ]; then
@@ -803,6 +871,16 @@ runs:
         echo "✅ Detected Clang: $CLANG_VERSION"
         echo "::endgroup::"
 
+    - name: Monitor Disk Usage Pre-Build
+      shell: bash
+      run: |
+        echo "::group::Pre-build disk usage"
+        df -h
+        echo "---"
+        echo "Largest directories in workspace:"
+        du -h -d 2 "$GITHUB_WORKSPACE" 2>/dev/null | sort -hr | head -20 || true
+        echo "::endgroup::"
+
     - name: Build Kernel
       shell: bash
       env:
@@ -917,6 +995,27 @@ runs:
         echo "Duration: $((BUILD_TIME / 60))m $((BUILD_TIME % 60))s"
         echo "Image Size: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")"
         echo "============================================"
+        echo "::endgroup::"
+
+    - name: Clean Build Artifacts
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Clean build artifacts"
+        cd "$CONFIG/kernel_platform/common/out"
+        
+        # Keep only essential files
+        find . -name "*.o" -delete
+        find . -name "*.cmd" -delete
+        find . -name "*.d" -delete
+        find . -name "*.a" -not -path "./arch/arm64/boot/*" -delete
+        find . -type d -name ".tmp_*" -exec rm -rf {} + 2>/dev/null || true
+        
+        # Remove source symlinks
+        find . -type l -delete 2>/dev/null || true
+        
+        echo "Disk usage after cleanup:"
+        df -h
         echo "::endgroup::"
 
     - name: Verify Kernel Modules
@@ -1036,7 +1135,7 @@ runs:
         IMG_SIZE=$(stat -c %s "$IMG")
         MIN_SIZE=6102400
         if [ "$IMG_SIZE" -lt "$MIN_SIZE" ]; then
-          echo "::error::Image size too small: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE") (minimum: $(numfmt --to=iec-i --suffix=B "$MIN_SIZE"))"
+          echo "::error::Image size too small: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")
           exit 1
         fi
         printf 'warnings_count=%s\n' "$WARNINGS_COUNT" >> "$GITHUB_OUTPUT"
