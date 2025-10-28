@@ -1183,112 +1183,49 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        echo "::group::📋 Final Build Summary"
+        echo "::group::📋 Build Summary"
         
-        BUILD_START="${{ env.BUILD_START }}"
-        BUILD_END="${{ env.BUILD_END }}"
-        
-        if [ -n "$BUILD_START" ] && [ -n "$BUILD_END" ]; then
-          BUILD_TIME=$((BUILD_END - BUILD_START))
-          BUILD_MINUTES=$((BUILD_TIME / 60))
-          BUILD_SECONDS=$((BUILD_TIME % 60))
-        else
-          BUILD_MINUTES="N/A"
-          BUILD_SECONDS=""
-        fi
+        # Safer variable access with defaults
+        ZIP_NAME="${{ steps.create_zip.outputs.zip_name }}"
+        CONFIG_DIR="${GITHUB_WORKSPACE}/${CONFIG:-unknown}"
         
         echo "╔════════════════════════════════════════════════════════════════╗"
         echo "║                    🎉 BUILD SUMMARY                            ║"
         echo "╠════════════════════════════════════════════════════════════════╣"
-        echo "║ Device Configuration                                           ║"
+        echo "║ Device: ${OP_MODEL:-N/A} (${OP_SOC:-N/A})"
+        echo "║ Branch: ${OP_BRANCH:-N/A}"
         echo "╠════════════════════════════════════════════════════════════════╣"
-        echo "║ Model:              ${OP_MODEL:-N/A}"
-        echo "║ SoC:                ${OP_SOC:-N/A}"
-        echo "║ Branch:             ${OP_BRANCH:-N/A}"
+        echo "║ Kernel: ${{ env.KERNEL_FULL_VER }}"
+        echo "║ Android: ${{ env.ANDROID_VER }}"
+        echo "║ Local Version: ${CUSTOM_LOCALVERSION:-N/A}"
         echo "╠════════════════════════════════════════════════════════════════╣"
-        echo "║ Kernel Information                                             ║"
+        echo "║ SukiSU: ${SUKISUVER:-N/A} (API ${KSU_API_VERSION:-N/A})"
+        echo "║ SUSFS: ${SUSVER:-N/A} (${SUSFS_COMMIT_SHA:0:8})"
         echo "╠════════════════════════════════════════════════════════════════╣"
-        echo "║ Version:            ${{ env.KERNEL_FULL_VER }}"
-        echo "║ Android Version:    ${{ env.ANDROID_VER }}"
-        echo "║ Kernel Version:     ${{ env.KERNEL_VER }}"
-        echo "║ Local Version:      ${CUSTOM_LOCALVERSION:-N/A}"
-        echo "╠════════════════════════════════════════════════════════════════╣"
-        echo "║ SukiSU Ultra & SUSFS                                           ║"
-        echo "╠════════════════════════════════════════════════════════════════╣"
-        echo "║ SukiSU Version:     ${SUKISUVER:-N/A}"
-        echo "║ SukiSU API:         ${KSU_API_VERSION:-N/A}"
-        echo "║ SUSFS Version:      ${SUSVER:-N/A}"
-        echo "║ SUSFS Commit:       ${SUSFS_COMMIT_SHA:0:8}"
-        echo "╠════════════════════════════════════════════════════════════════╣"
-        echo "║ Build Configuration                                            ║"
-        echo "╠════════════════════════════════════════════════════════════════╣"
-        echo "║ Hook Type:          ${{ inputs.hook }}"
-        echo "║ Optimization:       ${{ inputs.optimize_level }}"
-        echo "║ ZRAM Enabled:       ${{ inputs.enable_zram }}"
-        echo "║ LSM (BBG):          ${{ inputs.lsm }}"
-        echo "║ Clang:              ${CLANG_VERSION:-N/A}"
-        echo "╠════════════════════════════════════════════════════════════════╣"
-        echo "║ Build Statistics                                               ║"
+        echo "║ Hook: ${{ inputs.hook }}"
+        echo "║ Optimization: ${{ inputs.optimize_level }}"
+        echo "║ ZRAM: ${{ inputs.enable_zram }}"
+        echo "║ LSM: ${{ inputs.lsm }}"
         echo "╠════════════════════════════════════════════════════════════════╣"
         
-        if [ "$BUILD_MINUTES" != "N/A" ]; then
-          echo "║ Build Time:         ${BUILD_MINUTES}m ${BUILD_SECONDS}s"
-        else
-          echo "║ Build Time:         N/A"
-        fi
-        
-        echo "║ Warnings:           ${{ steps.collect_stats.outputs.warnings_count }}"
-        echo "║ Image SHA256:       ${{ steps.collect_stats.outputs.image_sha256 }}"
-        echo "╠════════════════════════════════════════════════════════════════╣"
-        echo "║ Output Files                                                   ║"
-        echo "╠════════════════════════════════════════════════════════════════╣"
-        echo "║ ZIP Package:        ${{ steps.create_zip.outputs.zip_name }}"
-        
-        CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
-        ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
-        
-        if [ -f "$ARTIFACTS_DIR/${{ steps.create_zip.outputs.zip_name }}" ]; then
-          ZIP_SIZE=$(stat -c%s "$ARTIFACTS_DIR/${{ steps.create_zip.outputs.zip_name }}" | numfmt --to=iec-i --suffix=B)
-          echo "║ ZIP Size:           $ZIP_SIZE"
-        fi
-        
-        IMAGE_PATH="$CONFIG_DIR/kernel_platform/common/out/arch/arm64/boot/Image"
-        if [ -f "$IMAGE_PATH" ]; then
-          IMAGE_SIZE=$(stat -c%s "$IMAGE_PATH" | numfmt --to=iec-i --suffix=B)
-          echo "║ Image Size:         $IMAGE_SIZE"
-        fi
-        
-        echo "╠════════════════════════════════════════════════════════════════╣"
-        echo "║ Cache Statistics                                               ║"
-        echo "╠════════════════════════════════════════════════════════════════╣"
-        
-        if command -v ccache >/dev/null 2>&1; then
-          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
-          CCACHE_STATS=$(ccache -s 2>/dev/null || echo "N/A")
+        if [ -n "${ZIP_NAME:-}" ]; then
+          echo "║ Package: $ZIP_NAME"
           
-          CACHE_HIT=$(echo "$CCACHE_STATS" | grep -i "cache hit" | head -n1 | awk '{print $NF}' || echo "N/A")
-          CACHE_MISS=$(echo "$CCACHE_STATS" | grep -i "cache miss" | head -n1 | awk '{print $NF}' || echo "N/A")
-          
-          echo "║ Cache Hits:         $CACHE_HIT"
-          echo "║ Cache Misses:       $CACHE_MISS"
-        else
-          echo "║ ccache:             Not available"
+          ZIP_PATH="$CONFIG_DIR/artifacts/$ZIP_NAME"
+          if [ -f "$ZIP_PATH" ]; then
+            ZIP_SIZE=$(stat -c%s "$ZIP_PATH" 2>/dev/null | numfmt --to=iec-i --suffix=B || echo "N/A")
+            echo "║ ZIP Size: $ZIP_SIZE"
+          fi
         fi
         
-        echo "╠════════════════════════════════════════════════════════════════╣"
-        echo "║ System Resources                                               ║"
-        echo "╠════════════════════════════════════════════════════════════════╣"
+        IMG_PATH="$CONFIG_DIR/kernel_platform/common/out/arch/arm64/boot/Image"
+        if [ -f "$IMG_PATH" ]; then
+          IMG_SIZE=$(stat -c%s "$IMG_PATH" 2>/dev/null | numfmt --to=iec-i --suffix=B || echo "N/A")
+          echo "║ Image Size: $IMG_SIZE"
+        fi
         
-        DISK_USAGE=$(df -h "$GITHUB_WORKSPACE" | awk 'NR==2 {print $5}')
-        MEMORY_USAGE=$(free -h | awk 'NR==2 {print $3 "/" $2}')
-        
-        echo "║ Disk Usage:         $DISK_USAGE"
-        echo "║ Memory Usage:       $MEMORY_USAGE"
         echo "╚════════════════════════════════════════════════════════════════╝"
-        
         echo ""
         echo "✅ Build completed successfully!"
         echo ""
         echo "::endgroup::"
-
-
