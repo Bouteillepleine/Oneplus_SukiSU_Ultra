@@ -1073,63 +1073,126 @@ runs:
       shell: bash
       continue-on-error: true
       run: |
-        set -e
-        echo "::group::Download ZRAM module"
-        echo "Attempting to get ZRAM module zip download link..."
+        set -euo pipefail
+        echo "::group::Download and package ZRAM module"
+        
+        # Step 1: Download the ZRAM Module template
+        echo "Downloading ZRAM Module template..."
         retries=3
-        success=0
+        download_success=false
+        
         for i in $(seq 1 $retries); do
           echo "Attempt $i to download..."
-          download_url=$(curl -s https://api.github.com/repos/Bouteillepleine/ZRAM-Module/releases/latest | \
-            grep "browser_download_url" | grep "ZRAM-Module-.*\.zip" | cut -d '"' -f 4 | head -n 1)
-    
-          if [ -n "$download_url" ]; then
-            echo "✅ Successfully obtained download link: $download_url"
-            wget -N "$download_url" && success=1 && break
-          else
-            echo "⚠️ Failed to get download link, retrying in 3 seconds..."
-            sleep 3
+          download_url=$(curl -fsSL https://api.github.com/repos/Bouteillepleine/ZRAM-Module/releases/latest | \
+            jq -r '.assets[] | select(.name | test("ZRAM-Module-.*\\.zip")) | .browser_download_url' | head -n1)
+          
+          if [ -n "$download_url" ] && [ "$download_url" != "null" ]; then
+            echo "✅ Found download link: $download_url"
+            if wget -q --show-progress "$download_url"; then
+              download_success=true
+              break
+            fi
           fi
+          
+          echo "⚠️ Download attempt $i failed, retrying in 3 seconds..."
+          sleep 3
         done
-    
-        if [ "$success" -ne 1 ]; then
-          echo "❌ Failed to get ZRAM module download link after $retries attempts"
+        
+        if [ "$download_success" = false ]; then
+          echo "❌ Failed to download ZRAM module template after $retries attempts"
           echo "upload=false" >> "$GITHUB_OUTPUT"
           echo "::endgroup::"
           exit 0
         fi
-    
-        unzip "$(ls -t ZRAM-Module-*.zip | head -1)" -d ZRAM-Module
-        target="./ZRAM-Module/zram/zram.ko"
-        echo "Searching for zram.ko module file..."
+        
+        # Step 2: Extract the template
+        ZRAM_ZIP=$(ls -t ZRAM-Module-*.zip 2>/dev/null | head -n1)
+        if [ -z "$ZRAM_ZIP" ] || [ ! -f "$ZRAM_ZIP" ]; then
+          echo "❌ ZRAM module ZIP not found after download"
+          echo "upload=false" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit 0
+        fi
+        
+        echo "Extracting $ZRAM_ZIP..."
+        unzip -q "$ZRAM_ZIP" -d ZRAM-Module-Template
+        
+        # Step 3: Find the built zram.ko from kernel compilation
+        echo "Searching for compiled zram.ko module..."
         search_paths=(
           "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common/out"
           "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/out"
+          "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
           "$GITHUB_WORKSPACE/$CONFIG/device/qcom"
         )
-        zram_path=""
-        for path in "${search_paths[@]}"; do
-          zram_path=$(find "$path" -type f -name "zram.ko" 2>/dev/null | head -n 1)
-          [ -n "$zram_path" ] && break
-        done
-        if [ -z "$zram_path" ]; then
-          zram_path=$(find "$GITHUB_WORKSPACE/$CONFIG" -type f -name "zram.ko" 2>/dev/null | head -n 1)
-        fi
-        if [ -n "$zram_path" ] && [ -f "$zram_path" ]; then
-          echo "✅ ZRAM module file located at: $zram_path"
-          mkdir -p "$(dirname "$target")"
-          if [ "$(realpath "$zram_path")" != "$(realpath "$target")" ]; then
-            cp "$zram_path" "$target"
-          else
-            echo "Source and target are the same, skipping copy"
+        
+        zram_ko_path=""
+        for base_path in "${search_paths[@]}"; do
+          if [ -d "$base_path" ]; then
+            found=$(find "$base_path" -type f -name "zram.ko" 2>/dev/null | head -n1)
+            if [ -n "$found" ]; then
+              zram_ko_path="$found"
+              break
+            fi
           fi
-          echo "upload=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "⚠️ zram.ko file not found"
-          echo "upload=false" >> "$GITHUB_OUTPUT"
+        done
+        
+        # Fallback: search entire CONFIG directory
+        if [ -z "$zram_ko_path" ]; then
+          echo "Performing deep search in $GITHUB_WORKSPACE/$CONFIG..."
+          zram_ko_path=$(find "$GITHUB_WORKSPACE/$CONFIG" -type f -name "zram.ko" 2>/dev/null | head -n1)
         fi
-        echo "::endgroup::"
-    
+        
+        if [ -z "$zram_ko_path" ] || [ ! -f "$zram_ko_path" ]; then
+          echo "❌ zram.ko module not found in kernel build output"
+          echo "Available .ko files:"
+          find "$GITHUB_WORKSPACE/$CONFIG/kernel_platform" -name "*.ko" -type f 2>/dev/null | head -n 10 || echo "No .ko files found"
+          echo "upload=false" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit 0
+        fi
+        
+        echo "✅ Found zram.ko at: $zram_ko_path"
+        
+        # Step 4: Create proper module structure
+        MODULE_DIR="./ZRAM-Module"
+        mkdir -p "$MODULE_DIR/zram"
+        
+        # Copy module template files
+        if [ -d "ZRAM-Module-Template/ZRAM-Module" ]; then
+          cp -r ZRAM-Module-Template/ZRAM-Module/* "$MODULE_DIR/"
+        else
+          echo "⚠️ Template structure unexpected, creating minimal structure"
+          mkdir -p "$MODULE_DIR/META-INF/com/google/android"
+        fi
+        
+        # Copy the built zram.ko
+        cp "$zram_ko_path" "$MODULE_DIR/zram/zram.ko"
+        
+        # Verify the module was copied
+        if [ ! -f "$MODULE_DIR/zram/zram.ko" ]; then
+          echo "❌ Failed to copy zram.ko to module directory"
+          echo "upload=false" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit 0
+        fi
+        
+        # Get module info
+        MODULE_SIZE=$(stat -c%s "$MODULE_DIR/zram/zram.ko")
+        MODULE_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B "$MODULE_SIZE")
+        
+        echo "✅ ZRAM module packaged successfully"
+        echo "   - Module size: $MODULE_SIZE_HUMAN"
+        echo "   - Location: $MODULE_DIR/zram/zram.ko"
+        echo "upload=true" >> "$GITHUB_OUTPUT"
+        
+        # List module contents for verification
+        echo ""
+        echo "Module structure:"
+        find "$MODULE_DIR" -type f | sort
+        
+        echo "::endgroup::"    
+   
     - name: Download SUSFS Module from CI
       shell: bash
       continue-on-error: true
@@ -1161,7 +1224,7 @@ runs:
         fi
         echo "::endgroup::"
     
-    - name: Create Kernel ZIP
+    - name: Create Kernel ZIP  
       id: create_zip
       shell: bash
       run: |
@@ -1177,44 +1240,180 @@ runs:
           exit 1
         fi
         
-        # Copy to AnyKernel3
+        # Copy kernel image to AnyKernel3
         cp "$IMAGE_PATH" "$GITHUB_WORKSPACE/AnyKernel3/Image"
         cd "$GITHUB_WORKSPACE/AnyKernel3"
         
+        # ========================================
+        # Include ZRAM Module if available
+        # ========================================
+        ZRAM_INCLUDED="false"
+        
+        echo "ZRAM inclusion check:"
+        echo "  - enable_zram input: ${{ inputs.enable_zram }}"
+        echo "  - zram_find output: ${{ steps.zram_find.outputs.upload }}"
+        
+        if [ "${{ inputs.enable_zram }}" = "true" ]; then
+          if [ "${{ steps.zram_find.outputs.upload }}" = "true" ]; then
+            
+            # Check if source directory exists
+            if [ ! -d "$GITHUB_WORKSPACE/ZRAM-Module" ]; then
+              echo "❌ ZRAM-Module directory not found at: $GITHUB_WORKSPACE/ZRAM-Module"
+              echo "Available directories in workspace:"
+              ls -la "$GITHUB_WORKSPACE/" | grep -i zram || echo "No ZRAM directories found"
+            else
+              echo "✅ Found ZRAM-Module directory"
+              
+              # Verify zram.ko exists before copying
+              if [ ! -f "$GITHUB_WORKSPACE/ZRAM-Module/zram/zram.ko" ]; then
+                echo "❌ zram.ko not found in ZRAM-Module directory"
+                echo "ZRAM-Module structure:"
+                find "$GITHUB_WORKSPACE/ZRAM-Module" -type f 2>/dev/null || echo "Cannot list files"
+              else
+                echo "✅ Found zram.ko in source directory"
+                
+                # Copy ZRAM module to AnyKernel3
+                echo "Copying ZRAM-Module to AnyKernel3..."
+                cp -rv "$GITHUB_WORKSPACE/ZRAM-Module" ./ || {
+                  echo "❌ Failed to copy ZRAM-Module"
+                  exit 1
+                }
+                
+                # Verify copy was successful
+                if [ ! -d "./ZRAM-Module" ]; then
+                  echo "❌ ZRAM-Module directory not found after copy"
+                  echo "Current directory contents:"
+                  ls -la ./
+                elif [ ! -f "./ZRAM-Module/zram/zram.ko" ]; then
+                  echo "❌ zram.ko not found after copy"
+                  echo "ZRAM-Module contents:"
+                  find "./ZRAM-Module" -type f
+                else
+                  # Success!
+                  ZRAM_SIZE=$(stat -c%s "./ZRAM-Module/zram/zram.ko")
+                  ZRAM_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B "$ZRAM_SIZE")
+                  
+                  echo "✅ ZRAM module successfully included"
+                  echo "   - Size: $ZRAM_SIZE_HUMAN"
+                  echo "   - Location: ./ZRAM-Module/zram/zram.ko"
+                  
+                  # Verify module is valid
+                  if file "./ZRAM-Module/zram/zram.ko" | grep -qi "ELF.*ARM"; then
+                    echo "   - Format: Valid ARM kernel module"
+                  else
+                    echo "   - Format: $(file ./ZRAM-Module/zram/zram.ko)"
+                  fi
+                  
+                  ZRAM_INCLUDED="true"
+                fi
+              fi
+            fi
+            
+          else
+            echo "⚠️ ZRAM module preparation failed (zram_find.outputs.upload != true)"
+          fi
+        else
+          echo "ℹ️ ZRAM not enabled (enable_zram = false)"
+        fi
+        
+        # ========================================
         # Construct ZIP name
-        ZIP_NAME="AnyKernel3_${OP_MODEL}_${{ env.KERNEL_FULL_VER }}_SukiSU_${SUKISUVER}_${SUSVER}.zip"
+        # ========================================
+        BASE_NAME="AnyKernel3_${OP_MODEL}_${{ env.KERNEL_FULL_VER }}_SukiSU_${SUKISUVER}_${SUSVER}"
+        
+        if [ "$ZRAM_INCLUDED" = "true" ]; then
+          ZIP_NAME="${BASE_NAME}_ZRAM.zip"
+        else
+          ZIP_NAME="${BASE_NAME}.zip"
+        fi
+        
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
         
+        # ========================================
+        # Show what will be included in ZIP
+        # ========================================
+        echo ""
+        echo "ZIP contents preview:"
+        echo "--------------------"
+        ls -lh Image
+        if [ "$ZRAM_INCLUDED" = "true" ]; then
+          echo ""
+          echo "ZRAM-Module structure:"
+          find ZRAM-Module -type f -exec ls -lh {} \;
+        fi
+        echo "--------------------"
+        
+        # ========================================
         # Create ZIP
+        # ========================================
+        echo ""
         echo "Creating flashable ZIP: $ZIP_NAME"
-        if ! zip -r "$ARTIFACTS_DIR/$ZIP_NAME" ./* -x "*.git*" >/dev/null 2>&1; then
+        
+        if ! zip -r "$ARTIFACTS_DIR/$ZIP_NAME" ./* -x "*.git*" "*.log" 2>&1 | tail -n 20; then
           echo "::error::Failed to create ZIP package"
           exit 1
         fi
         
-        # Verify ZIP was created and is non-empty
+        # Verify ZIP was created
         if [ ! -f "$ARTIFACTS_DIR/$ZIP_NAME" ]; then
-          echo "::error::ZIP file not found after creation: $ARTIFACTS_DIR/$ZIP_NAME"
+          echo "::error::ZIP file not found after creation"
           exit 1
         fi
         
         ZIP_SIZE=$(stat -c%s "$ARTIFACTS_DIR/$ZIP_NAME")
-        if [ "$ZIP_SIZE" -lt 1048576 ]; then
+        MIN_SIZE=1048576  # 1MB minimum
+        
+        if [ "$ZIP_SIZE" -lt "$MIN_SIZE" ]; then
           echo "::error::ZIP file too small: $(numfmt --to=iec-i --suffix=B "$ZIP_SIZE")"
           exit 1
         fi
         
-        # Clean up old artifacts (keep only current ZIP and version file)
-        find "$ARTIFACTS_DIR" -maxdepth 1 -type f ! -name "$ZIP_NAME" ! -name "${OP_MODEL}.txt" -delete
-        
         ZIP_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B "$ZIP_SIZE")
         
-        echo "✅ Kernel ZIP created successfully"
-        echo "   - Package: $ZIP_NAME"
-        echo "   - Size: $ZIP_SIZE_HUMAN"
+        # ========================================
+        # Verify ZIP contents
+        # ========================================
+        echo ""
+        echo "Verifying ZIP contents..."
+        if command -v unzip >/dev/null 2>&1; then
+          echo "Files in ZIP:"
+          unzip -l "$ARTIFACTS_DIR/$ZIP_NAME" | grep -E "(Image|zram\.ko|module\.prop)" || echo "Core files check:"
+          
+          # Specific checks
+          if unzip -l "$ARTIFACTS_DIR/$ZIP_NAME" | grep -q "Image"; then
+            echo "  ✅ Kernel Image found"
+          else
+            echo "  ❌ Kernel Image missing!"
+          fi
+          
+          if [ "$ZRAM_INCLUDED" = "true" ]; then
+            if unzip -l "$ARTIFACTS_DIR/$ZIP_NAME" | grep -q "ZRAM-Module/zram/zram.ko"; then
+              echo "  ✅ ZRAM module found in ZIP"
+            else
+              echo "  ❌ ZRAM module missing from ZIP!"
+              ZRAM_INCLUDED="false"  # Update status
+            fi
+          fi
+        fi
         
-        # Write output - guaranteed non-empty
+        # Clean up old artifacts
+        find "$ARTIFACTS_DIR" -maxdepth 1 -type f ! -name "$ZIP_NAME" ! -name "${OP_MODEL}.txt" -delete
+        
+        # ========================================
+        # Final Summary
+        # ========================================
+        echo ""
+        echo "============================================"
+        echo "✅ Kernel ZIP Created Successfully"
+        echo "============================================"
+        echo "Package: $ZIP_NAME"
+        echo "Size: $ZIP_SIZE_HUMAN"
+        echo "ZRAM included: $ZRAM_INCLUDED"
+        echo "Location: $ARTIFACTS_DIR/$ZIP_NAME"
+        echo "============================================"
+        
+        # Write output
         if [ -z "$ZIP_NAME" ]; then
           echo "::error::ZIP_NAME is empty"
           exit 1
