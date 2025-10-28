@@ -145,36 +145,88 @@ runs:
         echo "CCACHE_MAXSIZE=5G" >> "$GITHUB_ENV"
         mkdir -p "$HOME/.ccache_${{ env.CONFIG }}"
 
-    - name: Initialize and Sync Kernel Source
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::group::Initialize kernel source"
-        echo "Creating folder for configuration: $CONFIG"
-        mkdir -p "$CONFIG"
-        cd "$CONFIG"
-        echo "Initializing and syncing kernel source..."
-        if [[ "$OP_MANIFEST" == https://* ]]; then
-          mkdir -p .repo/manifests
-          curl --fail --show-error --location --proto '=https' "$OP_MANIFEST" -o .repo/manifests/temp_manifest.xml
-          "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git -b oneplus/sm8650 -m temp_manifest.xml --repo-rev=v2.16 --depth=1 --no-clone-bundle --no-tags
-        else
-          "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git -b "$OP_BRANCH" -m "$OP_MANIFEST" --repo-rev=v2.16 --depth=1 --no-clone-bundle --no-tags
+- name: Initialize and Sync Kernel Source
+  shell: bash
+  run: |
+    set -euo pipefail
+    echo "::group::Initialize kernel source"
+    
+    mkdir -p "$CONFIG"
+    cd "$CONFIG"
+    
+    # Initialize repo
+    if [[ "$OP_MANIFEST" == https://* ]]; then
+      mkdir -p .repo/manifests
+      
+      # Download with retries
+      for i in {1..5}; do
+        if curl --fail --show-error --location --proto '=https' \
+               --retry 3 --retry-delay 5 --connect-timeout 30 \
+               "$OP_MANIFEST" -o .repo/manifests/temp_manifest.xml; then
+          break
         fi
-        "$REPO" --version
-        success=false
-        for i in 1 2 3; do
-          if "$REPO" sync -c --no-clone-bundle --no-tags --optimized-fetch \
-             -j"$(nproc --all)" --fail-fast; then
-            success=true
-            break
-          fi
-          echo "⚠️ repo sync attempt $i failed; retrying..."
-          sleep 30
-        done
-        $success || { echo "::error::repo sync failed after 3 attempts"; exit 1; }
-        echo "✅ Kernel source synced"
-        echo "::endgroup::"
+        echo "::warning::Manifest download attempt $i failed"
+        sleep 10
+      done
+      
+      if [ ! -f .repo/manifests/temp_manifest.xml ]; then
+        echo "::error::Failed to download manifest after 5 attempts"
+        exit 1
+      fi
+      
+      "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git \
+        -b oneplus/sm8650 -m temp_manifest.xml \
+        --repo-rev=v2.16 --depth=1 --no-clone-bundle --no-tags
+    else
+      "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git \
+        -b "$OP_BRANCH" -m "$OP_MANIFEST" \
+        --repo-rev=v2.16 --depth=1 --no-clone-bundle --no-tags
+    fi
+    
+    # Sync with better error handling
+    success=false
+    for attempt in 1 2 3 4 5; do
+      echo "Sync attempt $attempt/5..."
+      
+      if "$REPO" sync -c --no-clone-bundle --no-tags \
+         --optimized-fetch --prune \
+         -j"$(nproc --all)" --fail-fast 2>&1 | tee sync.log; then
+        success=true
+        break
+      fi
+      
+      echo "::warning::Sync attempt $attempt failed"
+      
+      # Check for specific errors
+      if grep -qi "error: Cannot fetch" sync.log; then
+        echo "::warning::Network fetch error detected"
+      fi
+      
+      # Clean up partial sync
+      "$REPO" forall -c 'git clean -fdx' || true
+      
+      sleep 30
+    done
+    
+    if ! $success; then
+      echo "::error::repo sync failed after 5 attempts"
+      echo "::group::Sync log"
+      cat sync.log || echo "No sync log available"
+      echo "::endgroup::"
+      exit 1
+    fi
+    
+    # Validate sync completed
+    if [ ! -f "kernel_platform/common/Makefile" ]; then
+      echo "::error::Sync completed but kernel source missing"
+      echo "::group::Directory structure"
+      find . -maxdepth 3 -type d
+      echo "::endgroup::"
+      exit 1
+    fi
+    
+    echo "✅ Kernel source synced and validated"
+    echo "::endgroup::"
 
     - name: Get Kernel Version Info
       shell: bash
