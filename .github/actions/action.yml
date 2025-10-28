@@ -47,6 +47,9 @@ outputs:
   zip_name:
     description: 'Created ZIP filename'
     value: ${{ steps.create_zip.outputs.zip_name }}
+  zram_module_sha256:
+    description: 'ZRAM module SHA256 (if built)'
+    value: ${{ steps.build_zram.outputs.zram_sha256 }}
 
 runs:
   using: composite
@@ -334,9 +337,6 @@ runs:
           exit 1
         fi
         
-        echo "[+] Setup script content (first 10 lines):"
-        head -n 10 /tmp/ksu_setup.sh
-        
         echo "[+] Executing setup script..."
         if ! bash -x /tmp/ksu_setup.sh "$BRANCH_NAME" 2>&1 | tee /tmp/ksu_setup.log; then
           echo "::error::KernelSU setup script failed"
@@ -354,6 +354,7 @@ runs:
         
         cd ./KernelSU
     
+        # If manual hash specified, checkout that commit
         if [[ -n "$MANUAL_HASH" ]]; then
           echo "[+] Fetching specific commit: $MANUAL_HASH"
           if ! git fetch origin "$BRANCH_NAME" --depth=50; then
@@ -367,24 +368,17 @@ runs:
           SHORT_HASH=${MANUAL_HASH:0:8}
         fi
     
+        # Fetch KSU API version from remote
         echo "[+] Fetching KSU API version..."
-        if [ -f "kernel/Makefile" ]; then
-          KSU_API_VERSION=$(grep -m1 "KSU_VERSION_API :=" kernel/Makefile | awk -F'= ' '{print $2}' | tr -d '[:space:]' || echo "")
-          echo "Found local API version: $KSU_API_VERSION"
-        fi
+        KSU_API_VERSION=$(curl -fsSL --retry 3 --connect-timeout 30 \
+          "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/$BRANCH_NAME/kernel/Makefile" 2>/dev/null | \
+          grep -m1 "KSU_VERSION_API :=" | awk -F'= ' '{print $2}' | tr -d '[:space:]' || echo "")
         
-        if [ -z "$KSU_API_VERSION" ]; then
-          echo "Attempting to fetch from remote..."
+        if [[ -z "$KSU_API_VERSION" ]]; then
+          echo "⚠️ Could not fetch API version from branch $BRANCH_NAME, trying main..."
           KSU_API_VERSION=$(curl -fsSL --retry 3 --connect-timeout 30 \
-            "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/$BRANCH_NAME/kernel/Makefile" 2>/dev/null | \
+            "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/Makefile" 2>/dev/null | \
             grep -m1 "KSU_VERSION_API :=" | awk -F'= ' '{print $2}' | tr -d '[:space:]' || echo "")
-          
-          if [ -z "$KSU_API_VERSION" ]; then
-            echo "Trying main branch as fallback..."
-            KSU_API_VERSION=$(curl -fsSL --retry 3 --connect-timeout 30 \
-              "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/Makefile" 2>/dev/null | \
-              grep -m1 "KSU_VERSION_API :=" | awk -F'= ' '{print $2}' | tr -d '[:space:]' || echo "")
-          fi
         fi
         
         if [[ -z "$KSU_API_VERSION" ]]; then
@@ -406,7 +400,14 @@ runs:
         echo "KSU_API_VERSION=$KSU_API_VERSION" >> $GITHUB_ENV
     
         GIT_HASH=$(git rev-parse --short HEAD)
+        echo "Current git hash: $GIT_HASH"
     
+        # Calculate KSU version number (for manager compatibility)
+        KSU_VERSION=$(expr $(git rev-list --count HEAD 2>/dev/null || echo 13000) + 10700)
+        echo "SUKISUVER=$KSU_VERSION" >> $GITHUB_ENV
+        echo "KSU manager version: $KSU_VERSION"
+    
+        # Assemble version string
         if [[ -n "$MANUAL_HASH" ]]; then
           USE_HASH="$SHORT_HASH"
         else
@@ -420,21 +421,53 @@ runs:
         fi
     
         echo "[+] Updating Makefile with version info..."
+        # Clean up existing version definitions
         sed -i '/define get_ksu_version_full/,/endef/d' kernel/Makefile
         sed -i '/KSU_VERSION_API :=/d' kernel/Makefile
         sed -i '/KSU_VERSION_FULL :=/d' kernel/Makefile
+        sed -i '/KSU_VERSION :=/d' kernel/Makefile
     
-        printf 'define get_ksu_version_full\n%s\nendef\n\nKSU_VERSION_API := %s\nKSU_VERSION_FULL := %s\n' \
-          "$VERSION_FULL" "$KSU_API_VERSION" "$VERSION_FULL" > /tmp/version_def.txt
-        
-        awk '/REPO_OWNER :=/ {print; system("cat /tmp/version_def.txt"); inserted=1; next} 1 END {if (!inserted) system("cat /tmp/version_def.txt")}' \
-          kernel/Makefile > kernel/Makefile.tmp && mv kernel/Makefile.tmp kernel/Makefile
+        # Create version definitions (NO LEADING SPACES!)
+        VERSION_DEFINITIONS=$(cat <<'EOF'
+          define get_ksu_version_full
+          $(VERSION_FULL)
+          endef
     
-        KSU_VERSION=$(expr $(git rev-list --count HEAD 2>/dev/null || echo 13000) + 10700)
-        echo "SUKISUVER=$KSU_VERSION" >> $GITHUB_ENV
+          KSU_VERSION_API := $(API_VERSION)
+          KSU_VERSION_FULL := $(VERSION_FULL)
+          KSU_VERSION := $(MANAGER_VERSION)
+        EOF
+        )
     
-        echo "✅ SukiSU Ultra added: $VERSION_FULL (version $KSU_VERSION)"
+        # Replace placeholders with actual values
+        VERSION_DEFINITIONS="${VERSION_DEFINITIONS//\$(VERSION_FULL)/$VERSION_FULL}"
+        VERSION_DEFINITIONS="${VERSION_DEFINITIONS//\$(API_VERSION)/$KSU_API_VERSION}"
+        VERSION_DEFINITIONS="${VERSION_DEFINITIONS//\$(MANAGER_VERSION)/$KSU_VERSION}"
+    
+        # Insert after REPO_OWNER line
+        awk -v def="$VERSION_DEFINITIONS" '
+          /REPO_OWNER :=/ {print; print def; inserted=1; next}
+          1
+          END {if (!inserted) print def}
+        ' kernel/Makefile > kernel/Makefile.tmp && mv kernel/Makefile.tmp kernel/Makefile
+    
+        echo "::group::Makefile version information preview"
+        echo "--- Version definitions in Makefile ---"
+        grep -A15 "REPO_OWNER" kernel/Makefile || echo "REPO_OWNER not found"
+        echo ""
+        echo "--- Specific version variables ---"
+        grep "KSU_VERSION_API" kernel/Makefile || echo "KSU_VERSION_API not found"
+        grep "KSU_VERSION_FULL" kernel/Makefile || echo "KSU_VERSION_FULL not found"
+        grep "^KSU_VERSION :=" kernel/Makefile || echo "KSU_VERSION not found"
         echo "::endgroup::"
+    
+        echo "✅ SukiSU Ultra added successfully"
+        echo "   - API Version: $KSU_API_VERSION"
+        echo "   - Manager Version: $KSU_VERSION"
+        echo "   - Full Version: $VERSION_FULL"
+        echo "   - Git Hash: $GIT_HASH"
+        echo "::endgroup::"
+
     
     - name: Apply SUSFS Patches
       shell: bash
@@ -851,7 +884,6 @@ runs:
         : > "$COMMON/.scmversion"
         
         export PYTHONWARNINGS="${PYTHONWARNINGS}"
-        
         export SOURCE_DATE_EPOCH=1609459200
         export KBUILD_BUILD_TIMESTAMP="$(date -u -d @${SOURCE_DATE_EPOCH} '+%Y-%m-%d %H:%M:%S UTC')"
         export KBUILD_BUILD_USER="builder"
@@ -949,7 +981,6 @@ runs:
           exit 1
         fi
         
-        # Simple size check only (SHA256 will be calculated in collect_stats)
         IMG_SIZE=$(stat -c%s "$IMG")
         
         echo "============================================"
@@ -959,7 +990,75 @@ runs:
         echo "Image Size: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")"
         echo "============================================"
         echo "::endgroup::"
-    
+
+    - name: Build ZRAM Module
+      if: ${{ inputs.enable_zram == 'true' }}
+      id: build_zram
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Build ZRAM module"
+        KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
+        COMMON="$KERNEL_PATH/common"
+        OUT="$COMMON/out"
+        
+        cd "$COMMON"
+        
+        if [ -n "${CLANG_BIN_PATH:-}" ] && [ -x "${CLANG_BIN_PATH}/clang" ]; then
+          export PATH="${CLANG_BIN_PATH}:$PATH"
+        fi
+        
+        export PATH="/usr/lib/ccache:$PATH"
+        export LLVM=1 LLVM_IAS=1
+        export ARCH=arm64 SUBARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-android-
+        export CROSS_COMPILE_COMPAT=arm-linux-androideabi-
+        export LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy STRIP=llvm-strip
+        export CC="ccache clang"
+        export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+        
+        echo "Building ZRAM module (zram.ko)..."
+        if ! make -j"$(nproc --all)" O="$OUT" M=drivers/block/zram modules 2>&1 | tee zram_build.log; then
+          echo "::error::ZRAM module build failed"
+          echo "::group::Build log"
+          cat zram_build.log
+          echo "::endgroup::"
+          exit 1
+        fi
+        
+        ZRAM_MODULE="$OUT/drivers/block/zram/zram.ko"
+        if [ ! -f "$ZRAM_MODULE" ]; then
+          echo "::error::ZRAM module not found at: $ZRAM_MODULE"
+          echo "::group::Available files in drivers/block/zram/"
+          ls -lah "$OUT/drivers/block/zram/" || echo "Directory not found"
+          echo "::endgroup::"
+          exit 1
+        fi
+        
+        if ! file "$ZRAM_MODULE" | grep -qi 'ELF.*ARM aarch64'; then
+          echo "::error::ZRAM module is not ARM64 ELF format"
+          file "$ZRAM_MODULE"
+          exit 1
+        fi
+        
+        MODULE_SIZE=$(stat -c%s "$ZRAM_MODULE")
+        MIN_MODULE_SIZE=10240
+        if [ "$MODULE_SIZE" -lt "$MIN_MODULE_SIZE" ]; then
+          echo "::error::ZRAM module too small: $(numfmt --to=iec-i --suffix=B "$MODULE_SIZE")"
+          exit 1
+        fi
+        
+        ZRAM_SHA256="$(sha256sum "$ZRAM_MODULE" | awk '{print $1}')"
+        
+        echo "ZRAM_MODULE_PATH=$ZRAM_MODULE" >> "$GITHUB_ENV"
+        printf 'zram_sha256=%s\n' "$ZRAM_SHA256" >> "$GITHUB_OUTPUT"
+        
+        echo "✅ ZRAM module built successfully"
+        echo "   - Size: $(numfmt --to=iec-i --suffix=B "$MODULE_SIZE")"
+        echo "   - Path: $ZRAM_MODULE"
+        echo "   - SHA256: ${ZRAM_SHA256:0:16}...${ZRAM_SHA256:48:16}"
+        echo "::endgroup::"
+
     - name: ccache post-build stats
       if: always()
       shell: bash
@@ -978,12 +1077,10 @@ runs:
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
         
-        # Ensure all variables are set with fallbacks
         KERNEL_VERSION="${KERNEL_FULL_VER:-unknown}"
         SUKISU_VERSION="${SUKISUVER:-unknown}"
         SUSFS_VERSION="${SUSVER:-unknown}"
         
-        # Validate variables are non-empty
         if [ -z "$KERNEL_VERSION" ] || [ "$KERNEL_VERSION" = "unknown" ]; then
           echo "::warning::KERNEL_FULL_VER not set, using fallback"
           KERNEL_VERSION="unknown"
@@ -999,7 +1096,6 @@ runs:
           SUSFS_VERSION="unknown"
         fi
         
-        # Write outputs safely
         printf 'kernel_version=%s\n' "$KERNEL_VERSION" >> "$GITHUB_OUTPUT"
         printf 'sukisu_version=%s\n' "$SUKISU_VERSION" >> "$GITHUB_OUTPUT"
         printf 'susfs_version=%s\n' "$SUSFS_VERSION" >> "$GITHUB_OUTPUT"
@@ -1020,7 +1116,6 @@ runs:
         OUT="$COMMON/out"
         IMG="$OUT/arch/arm64/boot/Image"
         
-        # Count warnings safely - guaranteed single value
         if [ -f "$COMMON/build.log" ]; then
           WARNINGS_COUNT="$(grep -ciE '\bwarning:' "$COMMON/build.log" || true)"
           [ -n "$WARNINGS_COUNT" ] || WARNINGS_COUNT="0"
@@ -1028,20 +1123,17 @@ runs:
           WARNINGS_COUNT="0"
         fi
         
-        # Validate Image exists
         if [ ! -f "$IMG" ]; then
           echo "::error::Kernel Image not found at: $IMG"
           exit 1
         fi
         
-        # Validate Image is ARM64
         if ! file "$IMG" | grep -qi 'ARM64'; then
           echo "::error::Image is not ARM64 format"
           file "$IMG"
           exit 1
         fi
         
-        # Validate Image size (minimum 5.8MB = 6102400 bytes)
         IMG_SIZE=$(stat -c %s "$IMG")
         MIN_SIZE=6102400
         if [ "$IMG_SIZE" -lt "$MIN_SIZE" ]; then
@@ -1049,16 +1141,13 @@ runs:
           exit 1
         fi
         
-        # Calculate SHA256 - guaranteed single line output
         IMAGE_SHA256="$(sha256sum "$IMG" | awk '{print $1}')"
         
-        # Validate SHA256 format (64 hex chars)
         if ! [[ "$IMAGE_SHA256" =~ ^[a-f0-9]{64}$ ]]; then
           echo "::error::Invalid SHA256 format: '$IMAGE_SHA256'"
           exit 1
         fi
         
-        # Write outputs using printf (safest method)
         printf 'warnings_count=%s\n' "$WARNINGS_COUNT" >> "$GITHUB_OUTPUT"
         printf 'image_sha256=%s\n' "$IMAGE_SHA256" >> "$GITHUB_OUTPUT"
         
@@ -1067,69 +1156,78 @@ runs:
         echo "   - Image size: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")"
         echo "   - SHA256: ${IMAGE_SHA256:0:16}...${IMAGE_SHA256:48:16}"
 
-    - name: Download and Package ZRAM Module
-      if: ${{ inputs.enable_zram == 'true' }}
-      id: zram_find
+    - name: Package ZRAM Module
+      if: ${{ inputs.enable_zram == 'true' && steps.build_zram.outcome == 'success' }}
+      id: zram_package
       shell: bash
-      continue-on-error: true
       run: |
-        set -e
-        echo "::group::Download ZRAM module"
-        echo "Attempting to get ZRAM module zip download link..."
-        retries=3
-        success=0
-        for i in $(seq 1 $retries); do
-          echo "Attempt $i to download..."
+        set -euo pipefail
+        echo "::group::Package ZRAM module"
+        
+        cd "$GITHUB_WORKSPACE"
+        
+        echo "Downloading ZRAM module template..."
+        MAX_RETRIES=3
+        for i in $(seq 1 $MAX_RETRIES); do
           download_url=$(curl -s https://api.github.com/repos/Bouteillepleine/ZRAM-Module/releases/latest | \
             grep "browser_download_url" | grep "ZRAM-Module-.*\.zip" | cut -d '"' -f 4 | head -n 1)
-    
+          
           if [ -n "$download_url" ]; then
-            echo "✅ Successfully obtained download link: $download_url"
-            wget -N "$download_url" && success=1 && break
-          else
-            echo "⚠️ Failed to get download link, retrying in 3 seconds..."
-            sleep 3
+            if wget -q --timeout=30 --tries=3 "$download_url"; then
+              echo "✅ Template downloaded successfully"
+              break
+            fi
           fi
-        done
-    
-        if [ "$success" -ne 1 ]; then
-          echo "❌ Failed to get ZRAM module download link after $retries attempts"
-          echo "upload=false" >> "$GITHUB_OUTPUT"
-          echo "::endgroup::"
-          exit 0
-        fi
-    
-        unzip "$(ls -t ZRAM-Module-*.zip | head -1)" -d ZRAM-Module
-        target="./ZRAM-Module/zram/zram.ko"
-        echo "Searching for zram.ko module file..."
-        search_paths=(
-          "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common/out"
-          "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/out"
-          "$GITHUB_WORKSPACE/$CONFIG/device/qcom"
-        )
-        zram_path=""
-        for path in "${search_paths[@]}"; do
-          zram_path=$(find "$path" -type f -name "zram.ko" 2>/dev/null | head -n 1)
-          [ -n "$zram_path" ] && break
-        done
-        if [ -z "$zram_path" ]; then
-          zram_path=$(find "$GITHUB_WORKSPACE/$CONFIG" -type f -name "zram.ko" 2>/dev/null | head -n 1)
-        fi
-        if [ -n "$zram_path" ] && [ -f "$zram_path" ]; then
-          echo "✅ ZRAM module file located at: $zram_path"
-          mkdir -p "$(dirname "$target")"
-          if [ "$(realpath "$zram_path")" != "$(realpath "$target")" ]; then
-            cp "$zram_path" "$target"
-          else
-            echo "Source and target are the same, skipping copy"
+          
+          if [ $i -eq $MAX_RETRIES ]; then
+            echo "::error::Failed to download ZRAM module template after $MAX_RETRIES attempts"
+            exit 1
           fi
-          echo "upload=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "⚠️ zram.ko file not found"
-          echo "upload=false" >> "$GITHUB_OUTPUT"
+          
+          echo "⚠️ Attempt $i failed, retrying..."
+          sleep 5
+        done
+        
+        TEMPLATE_ZIP=$(ls -t ZRAM-Module-*.zip 2>/dev/null | head -1)
+        if [ -z "$TEMPLATE_ZIP" ]; then
+          echo "::error::No ZRAM module template ZIP found"
+          exit 1
         fi
+        
+        unzip -q "$TEMPLATE_ZIP" -d ZRAM-Module
+        
+        if [ -z "${ZRAM_MODULE_PATH:-}" ] || [ ! -f "$ZRAM_MODULE_PATH" ]; then
+          echo "::error::Built ZRAM module not found at: ${ZRAM_MODULE_PATH:-undefined}"
+          exit 1
+        fi
+        
+        TARGET="./ZRAM-Module/zram/zram.ko"
+        mkdir -p "$(dirname "$TARGET")"
+        cp "$ZRAM_MODULE_PATH" "$TARGET"
+        
+        ZRAM_ZIP_NAME="ZRAM-Module_${OP_MODEL}_${{ env.KERNEL_FULL_VER }}.zip"
+        cd ZRAM-Module
+        zip -r "../$CONFIG/artifacts/$ZRAM_ZIP_NAME" ./* -x "*.git*" >/dev/null 2>&1
+        cd ..
+        
+        ZRAM_ZIP_PATH="$CONFIG/artifacts/$ZRAM_ZIP_NAME"
+        if [ ! -f "$ZRAM_ZIP_PATH" ]; then
+          echo "::error::ZRAM ZIP not created: $ZRAM_ZIP_PATH"
+          exit 1
+        fi
+        
+        ZRAM_ZIP_SIZE=$(stat -c%s "$ZRAM_ZIP_PATH")
+        
+        echo "✅ ZRAM module packaged successfully"
+        echo "   - Module: $(basename "$ZRAM_MODULE_PATH")"
+        echo "   - Module Size: $(stat -c%s "$ZRAM_MODULE_PATH" | numfmt --to=iec-i --suffix=B)"
+        echo "   - Package: $ZRAM_ZIP_NAME"
+        echo "   - Package Size: $(numfmt --to=iec-i --suffix=B "$ZRAM_ZIP_SIZE")"
+        echo "   - SHA256: ${{ steps.build_zram.outputs.zram_sha256 }}"
+        
+        printf 'zram_zip_name=%s\n' "$ZRAM_ZIP_NAME" >> "$GITHUB_OUTPUT"
         echo "::endgroup::"
-    
+
     - name: Download SUSFS Module from CI
       shell: bash
       continue-on-error: true
@@ -1171,29 +1269,24 @@ runs:
         CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
         IMAGE_PATH="$CONFIG_DIR/kernel_platform/common/out/arch/arm64/boot/Image"
         
-        # Verify source image exists
         if [ ! -f "$IMAGE_PATH" ]; then
           echo "::error::Built Image not found at: $IMAGE_PATH"
           exit 1
         fi
         
-        # Copy to AnyKernel3
         cp "$IMAGE_PATH" "$GITHUB_WORKSPACE/AnyKernel3/Image"
         cd "$GITHUB_WORKSPACE/AnyKernel3"
         
-        # Construct ZIP name
         ZIP_NAME="AnyKernel3_${OP_MODEL}_${{ env.KERNEL_FULL_VER }}_SukiSU_${SUKISUVER}_${SUSVER}.zip"
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
         
-        # Create ZIP
         echo "Creating flashable ZIP: $ZIP_NAME"
         if ! zip -r "$ARTIFACTS_DIR/$ZIP_NAME" ./* -x "*.git*" >/dev/null 2>&1; then
           echo "::error::Failed to create ZIP package"
           exit 1
         fi
         
-        # Verify ZIP was created and is non-empty
         if [ ! -f "$ARTIFACTS_DIR/$ZIP_NAME" ]; then
           echo "::error::ZIP file not found after creation: $ARTIFACTS_DIR/$ZIP_NAME"
           exit 1
@@ -1205,8 +1298,7 @@ runs:
           exit 1
         fi
         
-        # Clean up old artifacts (keep only current ZIP and version file)
-        find "$ARTIFACTS_DIR" -maxdepth 1 -type f ! -name "$ZIP_NAME" ! -name "${OP_MODEL}.txt" -delete
+        find "$ARTIFACTS_DIR" -maxdepth 1 -type f ! -name "$ZIP_NAME" ! -name "${OP_MODEL}.txt" ! -name "ZRAM-Module_*.zip" -delete
         
         ZIP_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B "$ZIP_SIZE")
         
@@ -1214,7 +1306,6 @@ runs:
         echo "   - Package: $ZIP_NAME"
         echo "   - Size: $ZIP_SIZE_HUMAN"
         
-        # Write output - guaranteed non-empty
         if [ -z "$ZIP_NAME" ]; then
           echo "::error::ZIP_NAME is empty"
           exit 1
@@ -1229,12 +1320,49 @@ runs:
       run: |
         set -euo pipefail
         
-        echo "::group::📊 Final Summary"
-        echo "Model: ${{ fromJSON(inputs.op_config_json).model }}"
-        echo "Kernel: ${{ steps.save_metadata.outputs.kernel_version || 'N/A' }}"
-        echo "SukiSU: ${{ steps.save_metadata.outputs.sukisu_version || 'N/A' }}"
-        echo "SUSFS: ${{ steps.save_metadata.outputs.susfs_version || 'N/A' }}"
-        echo "Warnings: ${{ steps.collect_stats.outputs.warnings_count }}"
-        echo "Image SHA256: ${{ steps.collect_stats.outputs.image_sha256 }}"
-        echo "ZIP: ${{ steps.create_zip.outputs.zip_name }}"
+        echo "::group::📊 Final Build Summary"
+        echo "============================================"
+        echo "Device Configuration:"
+        echo "  - Model: ${{ fromJSON(inputs.op_config_json).model }}"
+        echo "  - SoC: ${{ fromJSON(inputs.op_config_json).soc }}"
+        echo "  - Branch: ${{ fromJSON(inputs.op_config_json).branch }}"
+        echo ""
+        echo "Software Versions:"
+        echo "  - Kernel: ${{ steps.save_metadata.outputs.kernel_version || 'N/A' }}"
+        echo "  - SukiSU: ${{ steps.save_metadata.outputs.sukisu_version || 'N/A' }}"
+        echo "  - SUSFS: ${{ steps.save_metadata.outputs.susfs_version || 'N/A' }}"
+        echo ""
+        echo "Build Configuration:"
+        echo "  - Hook Type: ${{ inputs.hook }}"
+        echo "  - Optimization: ${{ inputs.optimize_level }}"
+        echo "  - LSM (BBG): ${{ inputs.lsm }}"
+        echo "  - ZRAM Enhanced: ${{ inputs.enable_zram }}"
+        echo ""
+        echo "Build Results:"
+        echo "  - Warnings: ${{ steps.collect_stats.outputs.warnings_count }}"
+        echo "  - Image SHA256: ${{ steps.collect_stats.outputs.image_sha256 }}"
+        echo "  - Kernel ZIP: ${{ steps.create_zip.outputs.zip_name }}"
+        
+        if [ "${{ inputs.enable_zram }}" = "true" ]; then
+          echo ""
+          echo "ZRAM Module:"
+          if [ "${{ steps.build_zram.outcome }}" = "success" ]; then
+            echo "  - Build Status: ✅ Success"
+            echo "  - SHA256: ${{ steps.build_zram.outputs.zram_sha256 || 'N/A' }}"
+            echo "  - Package: ${{ steps.zram_package.outputs.zram_zip_name || 'N/A' }}"
+          else
+            echo "  - Build Status: ❌ Failed or Skipped"
+          fi
+        fi
+        
+        echo ""
+        echo "Build Timing:"
+        if [ -n "${BUILD_START:-}" ] && [ -n "${BUILD_END:-}" ]; then
+          BUILD_TIME=$((BUILD_END - BUILD_START))
+          echo "  - Kernel Build: $((BUILD_TIME / 60))m $((BUILD_TIME % 60))s"
+        else
+          echo "  - Kernel Build: N/A"
+        fi
+        
+        echo "============================================"
         echo "::endgroup::"
