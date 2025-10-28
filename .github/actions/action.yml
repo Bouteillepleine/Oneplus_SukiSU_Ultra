@@ -413,11 +413,19 @@ runs:
           USE_HASH="$GIT_HASH"
         fi
         
+        # ========================================
+        # BUILD VERSION STRING (for ZIP naming)
+        # ========================================
         if [[ -z "$CUSTOM_TAG" ]]; then
           VERSION_FULL="v$KSU_API_VERSION-$USE_HASH@$BRANCH_NAME"
         else
           VERSION_FULL="v$KSU_API_VERSION-$CUSTOM_TAG@$BRANCH_NAME[$USE_HASH]"
         fi
+        
+        # ========================================
+        # SAVE VERSION STRING TO ENV
+        # ========================================
+        echo "SUKISU_VERSION_STRING=$VERSION_FULL" >> $GITHUB_ENV
     
         echo "[+] Updating Makefile with version info..."
         sed -i '/define get_ksu_version_full/,/endef/d' kernel/Makefile
@@ -430,10 +438,13 @@ runs:
         awk '/REPO_OWNER :=/ {print; system("cat /tmp/version_def.txt"); inserted=1; next} 1 END {if (!inserted) system("cat /tmp/version_def.txt")}' \
           kernel/Makefile > kernel/Makefile.tmp && mv kernel/Makefile.tmp kernel/Makefile
     
+        # Build number (for internal tracking)
         KSU_VERSION=$(expr $(git rev-list --count HEAD 2>/dev/null || echo 13000) + 10700)
         echo "SUKISUVER=$KSU_VERSION" >> $GITHUB_ENV
     
-        echo "✅ SukiSU Ultra added: $VERSION_FULL (version $KSU_VERSION)"
+        echo "✅ SukiSU Ultra added:"
+        echo "   - Version string: $VERSION_FULL"
+        echo "   - Build number: $KSU_VERSION"
         echo "::endgroup::"
     
     - name: Apply SUSFS Patches
@@ -969,7 +980,7 @@ runs:
         ccache -s || true
         echo "::endgroup::"
     
-    - name: Save Build Metadata
+        - name: Save Build Metadata
       id: save_metadata
       shell: bash
       run: |
@@ -978,9 +989,9 @@ runs:
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
         
-        # Ensure all variables are set with fallbacks
+        # Use version string instead of build number
         KERNEL_VERSION="${KERNEL_FULL_VER:-unknown}"
-        SUKISU_VERSION="${SUKISUVER:-unknown}"
+        SUKISU_VERSION="${SUKISU_VERSION_STRING:-unknown}"  # ← CHANGED
         SUSFS_VERSION="${SUSVER:-unknown}"
         
         # Validate variables are non-empty
@@ -990,7 +1001,7 @@ runs:
         fi
         
         if [ -z "$SUKISU_VERSION" ] || [ "$SUKISU_VERSION" = "unknown" ]; then
-          echo "::warning::SUKISUVER not set, using fallback"
+          echo "::warning::SUKISU_VERSION_STRING not set, using fallback"
           SUKISU_VERSION="unknown"
         fi
         
@@ -1317,9 +1328,17 @@ runs:
         fi
         
         # ========================================
-        # Construct ZIP name
+        # Construct ZIP name with version string
         # ========================================
-        BASE_NAME="AnyKernel3_${OP_MODEL}_${{ env.KERNEL_FULL_VER }}_SukiSU_${SUKISUVER}_${SUSVER}"
+        # Use SUKISU_VERSION_STRING (full version) instead of SUKISUVER (build number)
+        SUKISU_VER="${SUKISU_VERSION_STRING:-unknown}"
+        
+        # Sanitize version string for filename (replace problematic characters)
+        # Keep: letters, numbers, dots, hyphens, underscores, @
+        # Replace: slashes, brackets, spaces with underscores
+        SUKISU_VER_SAFE=$(echo "$SUKISU_VER" | sed 's|[/\[\] ]|_|g')
+        
+        BASE_NAME="AnyKernel3_${OP_MODEL}_${{ env.KERNEL_FULL_VER }}_SukiSU_${SUKISU_VER_SAFE}_${SUSVER}"
         
         if [ "$ZRAM_INCLUDED" = "true" ]; then
           ZIP_NAME="${BASE_NAME}_ZRAM.zip"
@@ -1345,9 +1364,21 @@ runs:
         echo "--------------------"
         
         # ========================================
-        # Create ZIP
+        # Display ZIP naming details
         # ========================================
         echo ""
+        echo "ZIP naming details:"
+        echo "  - Model: ${OP_MODEL}"
+        echo "  - Kernel: ${{ env.KERNEL_FULL_VER }}"
+        echo "  - SukiSU (raw): $SUKISU_VER"
+        echo "  - SukiSU (safe): $SUKISU_VER_SAFE"
+        echo "  - SUSFS: ${SUSVER}"
+        echo "  - ZRAM: $ZRAM_INCLUDED"
+        echo ""
+        
+        # ========================================
+        # Create ZIP
+        # ========================================
         echo "Creating flashable ZIP: $ZIP_NAME"
         
         if ! zip -r "$ARTIFACTS_DIR/$ZIP_NAME" ./* -x "*.git*" "*.log" 2>&1 | tail -n 20; then
@@ -1409,6 +1440,7 @@ runs:
         echo "============================================"
         echo "Package: $ZIP_NAME"
         echo "Size: $ZIP_SIZE_HUMAN"
+        echo "SukiSU Version: $SUKISU_VER"
         echo "ZRAM included: $ZRAM_INCLUDED"
         echo "Location: $ARTIFACTS_DIR/$ZIP_NAME"
         echo "============================================"
