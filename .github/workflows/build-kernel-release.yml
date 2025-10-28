@@ -177,8 +177,7 @@ jobs:
             case "$out" in
               kernel_version) v="${{ steps.build.outputs.kernel_version }}" ;;
               sukisu_version) v="${{ steps.build.outputs.sukisu_version }}" ;;
-              susfs_version) v="${{ steps.build.outputs.susfs_version }}" ;;
-              image_sha256) v="${{ steps.build.outputs.image_sha256 }}" ;;
+              susfs_version) v="${{ steps.build.outputs.susfs_version }}" ;;              
               warnings_count) v="${{ steps.build.outputs.warnings_count }}" ;;
               zip_name) v="${{ steps.build.outputs.zip_name }}" ;;
             esac
@@ -201,7 +200,6 @@ jobs:
           | Kernel | ${{ steps.build.outputs.kernel_version }} |
           | SukiSU | ${{ steps.build.outputs.sukisu_version }} |
           | SUSFS | ${{ steps.build.outputs.susfs_version }} |
-          | SHA256 | \`${{ steps.build.outputs.image_sha256 }}\` |
           | Warnings | ${{ steps.build.outputs.warnings_count }} |
           | Package | \`${{ steps.build.outputs.zip_name }}\` |
           
