@@ -309,18 +309,24 @@ runs:
         cd "$CONFIG/kernel_platform"
     
         META="${{ inputs.ksu_meta }}"
+        
+        # Must contain at least 2 separators (3 fields)
         if [[ "$(grep -o '/' <<< "$META" | wc -l)" -lt 2 ]]; then
           echo "::error::ksu_meta parameter missing required '/' separators"
           echo "Format should be: branch/custom_tag/commit_hash"
           exit 1
         fi
     
+        # Parse fields: branch / custom_tag / manual_hash
         IFS='/' read -r BRANCH_NAME CUSTOM_TAG MANUAL_HASH <<< "$META"
     
         echo "Branch: $BRANCH_NAME"
         [[ -n "$CUSTOM_TAG" ]] && echo "Custom tag: $CUSTOM_TAG" || echo "Custom tag: Not set"
         [[ -n "$MANUAL_HASH" ]] && echo "Manual hash: $MANUAL_HASH" || echo "Manual hash: Not set"
     
+        # ========================================
+        # Download and execute setup script
+        # ========================================
         echo "[+] Downloading KernelSU setup script..."
         if ! curl -LSs --retry 3 --retry-delay 2 --connect-timeout 30 \
              "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" \
@@ -334,26 +340,24 @@ runs:
           exit 1
         fi
         
-        echo "[+] Setup script content (first 10 lines):"
-        head -n 10 /tmp/ksu_setup.sh
-        
         echo "[+] Executing setup script..."
         if ! bash -x /tmp/ksu_setup.sh "$BRANCH_NAME" 2>&1 | tee /tmp/ksu_setup.log; then
           echo "::error::KernelSU setup script failed"
-          echo "Setup script log:"
           cat /tmp/ksu_setup.log
           exit 1
         fi
         
         if [ ! -d "./KernelSU" ]; then
           echo "::error::KernelSU directory not created"
-          echo "Current directory contents:"
           ls -la
           exit 1
         fi
         
         cd ./KernelSU
     
+        # ========================================
+        # Checkout specific commit if specified
+        # ========================================
         if [[ -n "$MANUAL_HASH" ]]; then
           echo "[+] Fetching specific commit: $MANUAL_HASH"
           if ! git fetch origin "$BRANCH_NAME" --depth=50; then
@@ -367,30 +371,27 @@ runs:
           SHORT_HASH=${MANUAL_HASH:0:8}
         fi
     
+        # ========================================
+        # Fetch KSU API version from remote
+        # ========================================
         echo "[+] Fetching KSU API version..."
-        if [ -f "kernel/Makefile" ]; then
-          KSU_API_VERSION=$(grep -m1 "KSU_VERSION_API :=" kernel/Makefile | awk -F'= ' '{print $2}' | tr -d '[:space:]' || echo "")
-          echo "Found local API version: $KSU_API_VERSION"
-        fi
+        KSU_API_VERSION=$(curl -fsSL --retry 3 --connect-timeout 30 \
+          "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/$BRANCH_NAME/kernel/Makefile" 2>/dev/null | \
+          grep -m1 "KSU_VERSION_API :=" | awk -F'= ' '{print $2}' | tr -d '[:space:]' || echo "")
         
-        if [ -z "$KSU_API_VERSION" ]; then
-          echo "Attempting to fetch from remote..."
-          KSU_API_VERSION=$(curl -fsSL --retry 3 --connect-timeout 30 \
-            "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/$BRANCH_NAME/kernel/Makefile" 2>/dev/null | \
-            grep -m1 "KSU_VERSION_API :=" | awk -F'= ' '{print $2}' | tr -d '[:space:]' || echo "")
-          
-          if [ -z "$KSU_API_VERSION" ]; then
-            echo "Trying main branch as fallback..."
-            KSU_API_VERSION=$(curl -fsSL --retry 3 --connect-timeout 30 \
-              "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/Makefile" 2>/dev/null | \
-              grep -m1 "KSU_VERSION_API :=" | awk -F'= ' '{print $2}' | tr -d '[:space:]' || echo "")
+        # Validate and fallback
+        if [[ -z "$KSU_API_VERSION" ]]; then
+          echo "⚠️ Could not fetch API version from remote, trying local..."
+          if [ -f "kernel/Makefile" ]; then
+            KSU_API_VERSION=$(grep -m1 "KSU_VERSION_API :=" kernel/Makefile | awk -F'= ' '{print $2}' | tr -d '[:space:]' || echo "")
           fi
         fi
         
         if [[ -z "$KSU_API_VERSION" ]]; then
-          echo "⚠️ Could not fetch API version from any source, using default: 3.1.7"
+          echo "⚠️ Could not determine API version, using default: 3.1.7"
           KSU_API_VERSION="3.1.7"
         else
+          # Ensure minimum version 3.1.7
           if ! [[ "$KSU_API_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "⚠️ Invalid API version format: $KSU_API_VERSION, using default: 3.1.7"
             KSU_API_VERSION="3.1.7"
@@ -405,47 +406,80 @@ runs:
         echo "Using KSU API version: $KSU_API_VERSION"
         echo "KSU_API_VERSION=$KSU_API_VERSION" >> $GITHUB_ENV
     
-        GIT_HASH=$(git rev-parse --short HEAD)
+        # ========================================
+        # Calculate build number (KSUVER)
+        # ========================================
+        echo "[+] Calculating build number..."
+        KSU_VERSION=$(expr $(git rev-list --count HEAD 2>/dev/null || echo 13000) + 10700)
+        echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+        echo "Build number: $KSU_VERSION"
     
+        # ========================================
+        # Get current git hash (AFTER checkout)
+        # ========================================
+        GIT_HASH=$(git rev-parse --short HEAD)
+        echo "Current git hash: $GIT_HASH"
+    
+        # ========================================
+        # Construct version string
+        # ========================================
         if [[ -n "$MANUAL_HASH" ]]; then
           USE_HASH="$SHORT_HASH"
         else
           USE_HASH="$GIT_HASH"
         fi
         
-        # ========================================
-        # BUILD VERSION STRING (for ZIP naming)
-        # ========================================
         if [[ -z "$CUSTOM_TAG" ]]; then
           VERSION_FULL="v$KSU_API_VERSION-$USE_HASH@$BRANCH_NAME"
         else
           VERSION_FULL="v$KSU_API_VERSION-$CUSTOM_TAG@$BRANCH_NAME[$USE_HASH]"
         fi
         
-        # ========================================
-        # SAVE VERSION STRING TO ENV
-        # ========================================
+        echo "Constructed version: $VERSION_FULL"
+        
+        # Save version string to environment
         echo "SUKISU_VERSION_STRING=$VERSION_FULL" >> $GITHUB_ENV
     
+        # ========================================
+        # Update Makefile with version info
+        # ========================================
         echo "[+] Updating Makefile with version info..."
+        
+        # Remove old version definitions
         sed -i '/define get_ksu_version_full/,/endef/d' kernel/Makefile
         sed -i '/KSU_VERSION_API :=/d' kernel/Makefile
         sed -i '/KSU_VERSION_FULL :=/d' kernel/Makefile
     
-        printf 'define get_ksu_version_full\n%s\nendef\n\nKSU_VERSION_API := %s\nKSU_VERSION_FULL := %s\n' \
-          "$VERSION_FULL" "$KSU_API_VERSION" "$VERSION_FULL" > /tmp/version_def.txt
-        
-        awk '/REPO_OWNER :=/ {print; system("cat /tmp/version_def.txt"); inserted=1; next} 1 END {if (!inserted) system("cat /tmp/version_def.txt")}' \
-          kernel/Makefile > kernel/Makefile.tmp && mv kernel/Makefile.tmp kernel/Makefile
+        # Create version definitions
+        VERSION_DEFINITIONS=$(cat <<EOF
+        define get_ksu_version_full
+        $VERSION_FULL
+        endef
+
+        KSU_VERSION_API := $KSU_API_VERSION
+        KSU_VERSION_FULL := $VERSION_FULL
+        EOF
+        )
     
-        # Build number (for internal tracking)
-        KSU_VERSION=$(expr $(git rev-list --count HEAD 2>/dev/null || echo 13000) + 10700)
-        echo "SUKISUVER=$KSU_VERSION" >> $GITHUB_ENV
+        # Insert after REPO_OWNER line
+        awk -v def="$VERSION_DEFINITIONS" '
+          /REPO_OWNER :=/ {print; print def; inserted=1; next}
+          1
+          END {if (!inserted) print def}
+        ' kernel/Makefile > kernel/Makefile.tmp && mv kernel/Makefile.tmp kernel/Makefile
     
+        # ========================================
+        # Final Summary
+        # ========================================
+        echo ""
         echo "✅ SukiSU Ultra added:"
         echo "   - Version string: $VERSION_FULL"
         echo "   - Build number: $KSU_VERSION"
+        echo "   - API version: $KSU_API_VERSION"
+        echo "   - Git hash: $USE_HASH"
         echo "::endgroup::"
+      env:
+        CONFIG: ${{ env.CONFIG }}
     
     - name: Apply SUSFS Patches
       shell: bash
@@ -989,19 +1023,19 @@ runs:
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
         
-        # Use version string instead of build number
+        # Use build number for sukisu_version (matches reference YAML)
         KERNEL_VERSION="${KERNEL_FULL_VER:-unknown}"
-        SUKISU_VERSION="${SUKISU_VERSION_STRING:-unknown}"  # ← CHANGED
+        SUKISU_VERSION="${KSUVER:-unknown}"        # ← CHANGED: Use KSUVER
         SUSFS_VERSION="${SUSVER:-unknown}"
         
-        # Validate variables are non-empty
+        # Validate variables
         if [ -z "$KERNEL_VERSION" ] || [ "$KERNEL_VERSION" = "unknown" ]; then
           echo "::warning::KERNEL_FULL_VER not set, using fallback"
           KERNEL_VERSION="unknown"
         fi
         
         if [ -z "$SUKISU_VERSION" ] || [ "$SUKISU_VERSION" = "unknown" ]; then
-          echo "::warning::SUKISU_VERSION_STRING not set, using fallback"
+          echo "::warning::KSUVER not set, using fallback"
           SUKISU_VERSION="unknown"
         fi
         
@@ -1010,7 +1044,7 @@ runs:
           SUSFS_VERSION="unknown"
         fi
         
-        # Write outputs safely
+        # Write outputs
         printf 'kernel_version=%s\n' "$KERNEL_VERSION" >> "$GITHUB_OUTPUT"
         printf 'sukisu_version=%s\n' "$SUKISU_VERSION" >> "$GITHUB_OUTPUT"
         printf 'susfs_version=%s\n' "$SUSFS_VERSION" >> "$GITHUB_OUTPUT"
@@ -1235,7 +1269,7 @@ runs:
         fi
         echo "::endgroup::"
     
-    - name: Create Kernel ZIP  
+        - name: Create Kernel ZIP  
       id: create_zip
       shell: bash
       run: |
@@ -1245,13 +1279,17 @@ runs:
         CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
         IMAGE_PATH="$CONFIG_DIR/kernel_platform/common/out/arch/arm64/boot/Image"
         
+        # ========================================
         # Verify source image exists
+        # ========================================
         if [ ! -f "$IMAGE_PATH" ]; then
           echo "::error::Built Image not found at: $IMAGE_PATH"
           exit 1
         fi
         
+        # ========================================
         # Copy kernel image to AnyKernel3
+        # ========================================
         cp "$IMAGE_PATH" "$GITHUB_WORKSPACE/AnyKernel3/Image"
         cd "$GITHUB_WORKSPACE/AnyKernel3"
         
@@ -1328,17 +1366,18 @@ runs:
         fi
         
         # ========================================
-        # Construct ZIP name with version string
+        # Construct ZIP name with build number
         # ========================================
-        # Use SUKISU_VERSION_STRING (full version) instead of SUKISUVER (build number)
-        SUKISU_VER="${SUKISU_VERSION_STRING:-unknown}"
+        # Use KSUVER (build number) instead of SUKISU_VERSION_STRING
+        SUKISU_VER="${KSUVER:-unknown}"
         
-        # Sanitize version string for filename (replace problematic characters)
-        # Keep: letters, numbers, dots, hyphens, underscores, @
-        # Replace: slashes, brackets, spaces with underscores
-        SUKISU_VER_SAFE=$(echo "$SUKISU_VER" | sed 's|[/\[\] ]|_|g')
+        # Validate KSUVER is set
+        if [ -z "$SUKISU_VER" ] || [ "$SUKISU_VER" = "unknown" ]; then
+          echo "::error::KSUVER not set - cannot create package name"
+          exit 1
+        fi
         
-        BASE_NAME="AnyKernel3_${OP_MODEL}_${{ env.KERNEL_FULL_VER }}_SukiSU_${SUKISU_VER_SAFE}_${SUSVER}"
+        BASE_NAME="AnyKernel3_${OP_MODEL}_${{ env.KERNEL_FULL_VER }}_SukiSU_${SUKISU_VER}_${SUSVER}"
         
         if [ "$ZRAM_INCLUDED" = "true" ]; then
           ZIP_NAME="${BASE_NAME}_ZRAM.zip"
@@ -1370,8 +1409,7 @@ runs:
         echo "ZIP naming details:"
         echo "  - Model: ${OP_MODEL}"
         echo "  - Kernel: ${{ env.KERNEL_FULL_VER }}"
-        echo "  - SukiSU (raw): $SUKISU_VER"
-        echo "  - SukiSU (safe): $SUKISU_VER_SAFE"
+        echo "  - SukiSU build: $SUKISU_VER"
         echo "  - SUSFS: ${SUSVER}"
         echo "  - ZRAM: $ZRAM_INCLUDED"
         echo ""
@@ -1386,7 +1424,9 @@ runs:
           exit 1
         fi
         
+        # ========================================
         # Verify ZIP was created
+        # ========================================
         if [ ! -f "$ARTIFACTS_DIR/$ZIP_NAME" ]; then
           echo "::error::ZIP file not found after creation"
           exit 1
@@ -1428,7 +1468,9 @@ runs:
           fi
         fi
         
+        # ========================================
         # Clean up old artifacts
+        # ========================================
         find "$ARTIFACTS_DIR" -maxdepth 1 -type f ! -name "$ZIP_NAME" ! -name "${OP_MODEL}.txt" -delete
         
         # ========================================
@@ -1440,12 +1482,14 @@ runs:
         echo "============================================"
         echo "Package: $ZIP_NAME"
         echo "Size: $ZIP_SIZE_HUMAN"
-        echo "SukiSU Version: $SUKISU_VER"
+        echo "SukiSU Build: $SUKISU_VER"
         echo "ZRAM included: $ZRAM_INCLUDED"
         echo "Location: $ARTIFACTS_DIR/$ZIP_NAME"
         echo "============================================"
         
+        # ========================================
         # Write output
+        # ========================================
         if [ -z "$ZIP_NAME" ]; then
           echo "::error::ZIP_NAME is empty"
           exit 1
@@ -1453,19 +1497,8 @@ runs:
         
         printf 'zip_name=%s\n' "$ZIP_NAME" >> "$GITHUB_OUTPUT"
         echo "::endgroup::"
-
-    - name: Final Build Summary
-      if: always()
-      shell: bash
-      run: |
-        set -euo pipefail
-        
-        echo "::group::📊 Final Summary"
-        echo "Model: ${{ fromJSON(inputs.op_config_json).model }}"
-        echo "Kernel: ${{ steps.save_metadata.outputs.kernel_version || 'N/A' }}"
-        echo "SukiSU: ${{ steps.save_metadata.outputs.sukisu_version || 'N/A' }}"
-        echo "SUSFS: ${{ steps.save_metadata.outputs.susfs_version || 'N/A' }}"
-        echo "Warnings: ${{ steps.collect_stats.outputs.warnings_count }}"
-        echo "Image SHA256: ${{ steps.collect_stats.outputs.image_sha256 }}"
-        echo "ZIP: ${{ steps.create_zip.outputs.zip_name }}"
-        echo "::endgroup::"
+      env:
+        CONFIG: ${{ env.CONFIG }}
+        OP_MODEL: ${{ fromJSON(inputs.op_config_json).model }}
+        KSUVER: ${{ env.KSUVER }}
+        SUSVER: ${{ env.SUSVER }}
