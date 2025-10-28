@@ -949,14 +949,14 @@ runs:
           exit 1
         fi
         
-        sha256sum "$IMG" | tee "$OUT/Image.sha256"
+        # Simple size check only (SHA256 will be calculated in collect_stats)
+        IMG_SIZE=$(stat -c%s "$IMG")
         
         echo "============================================"
         echo "✅ Build Completed Successfully"
         echo "============================================"
         echo "Duration: $((BUILD_TIME / 60))m $((BUILD_TIME % 60))s"
-        echo "Image Size: $(stat -c%s "$IMG" | numfmt --to=iec-i --suffix=B)"
-        echo "Image SHA256: $(cut -d' ' -f1 "$OUT/Image.sha256")"
+        echo "Image Size: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")"
         echo "============================================"
         echo "::endgroup::"
     
@@ -976,11 +976,38 @@ runs:
         set -euo pipefail
         CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
-        cd "$ARTIFACTS_DIR"
+        mkdir -p "$ARTIFACTS_DIR"
         
-        printf "kernel_version=%s\n" "${{ env.KERNEL_FULL_VER }}" >> "$GITHUB_OUTPUT"
-        printf "sukisu_version=%s\n" "${SUKISUVER:-unknown}" >> "$GITHUB_OUTPUT"
-        printf "susfs_version=%s\n" "${SUSVER:-unknown}" >> "$GITHUB_OUTPUT"
+        # Ensure all variables are set with fallbacks
+        KERNEL_VERSION="${KERNEL_FULL_VER:-unknown}"
+        SUKISU_VERSION="${SUKISUVER:-unknown}"
+        SUSFS_VERSION="${SUSVER:-unknown}"
+        
+        # Validate variables are non-empty
+        if [ -z "$KERNEL_VERSION" ] || [ "$KERNEL_VERSION" = "unknown" ]; then
+          echo "::warning::KERNEL_FULL_VER not set, using fallback"
+          KERNEL_VERSION="unknown"
+        fi
+        
+        if [ -z "$SUKISU_VERSION" ] || [ "$SUKISU_VERSION" = "unknown" ]; then
+          echo "::warning::SUKISUVER not set, using fallback"
+          SUKISU_VERSION="unknown"
+        fi
+        
+        if [ -z "$SUSFS_VERSION" ] || [ "$SUSFS_VERSION" = "unknown" ]; then
+          echo "::warning::SUSVER not set, using fallback"
+          SUSFS_VERSION="unknown"
+        fi
+        
+        # Write outputs safely
+        printf 'kernel_version=%s\n' "$KERNEL_VERSION" >> "$GITHUB_OUTPUT"
+        printf 'sukisu_version=%s\n' "$SUKISU_VERSION" >> "$GITHUB_OUTPUT"
+        printf 'susfs_version=%s\n' "$SUSFS_VERSION" >> "$GITHUB_OUTPUT"
+        
+        echo "✅ Metadata saved:"
+        echo "   - Kernel: $KERNEL_VERSION"
+        echo "   - SukiSU: $SUKISU_VERSION"
+        echo "   - SUSFS: $SUSFS_VERSION"
 
     - name: Collect Build Stats / Validate Image
       id: collect_stats
@@ -993,22 +1020,52 @@ runs:
         OUT="$COMMON/out"
         IMG="$OUT/arch/arm64/boot/Image"
         
+        # Count warnings safely - guaranteed single value
         if [ -f "$COMMON/build.log" ]; then
-          WARNINGS_COUNT=$(grep -ciE 'warning:' "$COMMON/build.log" || echo 0)
+          WARNINGS_COUNT="$(grep -ciE '\bwarning:' "$COMMON/build.log" || true)"
+          [ -n "$WARNINGS_COUNT" ] || WARNINGS_COUNT="0"
         else
-          WARNINGS_COUNT=0
+          WARNINGS_COUNT="0"
         fi
         
-        [ -f "$IMG" ] || { echo "::error::Kernel Image not found"; exit 1; }
-        file "$IMG" | grep -qi 'ARM64' || { echo "::error::Image not ARM64"; exit 1; }
-        [ "$(stat -c %s "$IMG")" -ge 6102400 ] || { echo "::error::Image size too small"; exit 1; }
+        # Validate Image exists
+        if [ ! -f "$IMG" ]; then
+          echo "::error::Kernel Image not found at: $IMG"
+          exit 1
+        fi
         
-        IMAGE_SHA256=$(sha256sum "$IMG" | awk '{print $1}')
+        # Validate Image is ARM64
+        if ! file "$IMG" | grep -qi 'ARM64'; then
+          echo "::error::Image is not ARM64 format"
+          file "$IMG"
+          exit 1
+        fi
         
-        {
-          echo "warnings_count=$WARNINGS_COUNT"
-          echo "image_sha256=$IMAGE_SHA256"
-        } >> "$GITHUB_OUTPUT"
+        # Validate Image size (minimum 5.8MB = 6102400 bytes)
+        IMG_SIZE=$(stat -c %s "$IMG")
+        MIN_SIZE=6102400
+        if [ "$IMG_SIZE" -lt "$MIN_SIZE" ]; then
+          echo "::error::Image size too small: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE") (minimum: $(numfmt --to=iec-i --suffix=B "$MIN_SIZE"))"
+          exit 1
+        fi
+        
+        # Calculate SHA256 - guaranteed single line output
+        IMAGE_SHA256="$(sha256sum "$IMG" | awk '{print $1}')"
+        
+        # Validate SHA256 format (64 hex chars)
+        if ! [[ "$IMAGE_SHA256" =~ ^[a-f0-9]{64}$ ]]; then
+          echo "::error::Invalid SHA256 format: '$IMAGE_SHA256'"
+          exit 1
+        fi
+        
+        # Write outputs using printf (safest method)
+        printf 'warnings_count=%s\n' "$WARNINGS_COUNT" >> "$GITHUB_OUTPUT"
+        printf 'image_sha256=%s\n' "$IMAGE_SHA256" >> "$GITHUB_OUTPUT"
+        
+        echo "✅ Validation passed:"
+        echo "   - Warnings: $WARNINGS_COUNT"
+        echo "   - Image size: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")"
+        echo "   - SHA256: ${IMAGE_SHA256:0:16}...${IMAGE_SHA256:48:16}"
 
     - name: Download and Package ZRAM Module
       if: ${{ inputs.enable_zram == 'true' }}
@@ -1114,30 +1171,56 @@ runs:
         CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
         IMAGE_PATH="$CONFIG_DIR/kernel_platform/common/out/arch/arm64/boot/Image"
         
+        # Verify source image exists
         if [ ! -f "$IMAGE_PATH" ]; then
-          echo "::error::Built Image not found at $IMAGE_PATH"
+          echo "::error::Built Image not found at: $IMAGE_PATH"
           exit 1
         fi
-    
+        
+        # Copy to AnyKernel3
         cp "$IMAGE_PATH" "$GITHUB_WORKSPACE/AnyKernel3/Image"
         cd "$GITHUB_WORKSPACE/AnyKernel3"
         
+        # Construct ZIP name
         ZIP_NAME="AnyKernel3_${OP_MODEL}_${{ env.KERNEL_FULL_VER }}_SukiSU_${SUKISUVER}_${SUSVER}.zip"
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
-    
+        
+        # Create ZIP
         echo "Creating flashable ZIP: $ZIP_NAME"
-        zip -r "$ARTIFACTS_DIR/$ZIP_NAME" ./* -x "*.git*" >/dev/null
-    
+        if ! zip -r "$ARTIFACTS_DIR/$ZIP_NAME" ./* -x "*.git*" >/dev/null 2>&1; then
+          echo "::error::Failed to create ZIP package"
+          exit 1
+        fi
+        
+        # Verify ZIP was created and is non-empty
+        if [ ! -f "$ARTIFACTS_DIR/$ZIP_NAME" ]; then
+          echo "::error::ZIP file not found after creation: $ARTIFACTS_DIR/$ZIP_NAME"
+          exit 1
+        fi
+        
+        ZIP_SIZE=$(stat -c%s "$ARTIFACTS_DIR/$ZIP_NAME")
+        if [ "$ZIP_SIZE" -lt 1048576 ]; then
+          echo "::error::ZIP file too small: $(numfmt --to=iec-i --suffix=B "$ZIP_SIZE")"
+          exit 1
+        fi
+        
+        # Clean up old artifacts (keep only current ZIP and version file)
         find "$ARTIFACTS_DIR" -maxdepth 1 -type f ! -name "$ZIP_NAME" ! -name "${OP_MODEL}.txt" -delete
-    
-        ZIP_SIZE=$(stat -c%s "$ARTIFACTS_DIR/$ZIP_NAME" | numfmt --to=iec-i --suffix=B)
+        
+        ZIP_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B "$ZIP_SIZE")
         
         echo "✅ Kernel ZIP created successfully"
-        echo "Package: $ZIP_NAME"
-        echo "Size: $ZIP_SIZE"
+        echo "   - Package: $ZIP_NAME"
+        echo "   - Size: $ZIP_SIZE_HUMAN"
         
-        printf "zip_name=%s\n" "$ZIP_NAME" >> "$GITHUB_OUTPUT"
+        # Write output - guaranteed non-empty
+        if [ -z "$ZIP_NAME" ]; then
+          echo "::error::ZIP_NAME is empty"
+          exit 1
+        fi
+        
+        printf 'zip_name=%s\n' "$ZIP_NAME" >> "$GITHUB_OUTPUT"
         echo "::endgroup::"
 
     - name: Final Build Summary
