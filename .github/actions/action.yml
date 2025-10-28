@@ -4,8 +4,7 @@ inputs:
   op_config_json:
     description: |
       JSON string containing full device config.
-      Required fields: model, soc, branch, manifest
-      Example: '{"model":"OP12","soc":"sm8550","branch":"android-14","manifest":"default.xml"}'
+      Required fields: model, soc, branch, manifest     
     required: true
   ksu_meta:
     description: 'SukiSU Ultra metadata (branch/tag/hash)'
