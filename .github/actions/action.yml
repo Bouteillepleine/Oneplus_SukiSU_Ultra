@@ -1358,14 +1358,17 @@ runs:
           echo "**Filename:** \`${{ steps.create_zip.outputs.zip_name }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          if [ -n "${{ steps.create_zip.outputs.ZIP_SIZE }}" ]; then
-            SIZE_MB=$(echo "scale=2; ${{ steps.create_zip.outputs.ZIP_SIZE }} / 1024 / 1024" | bc)
+          # Use lowercase output names and add safety checks
+          ZIP_SIZE="${{ steps.create_zip.outputs.zip_size }}"
+          if [ -n "$ZIP_SIZE" ] && [ "$ZIP_SIZE" != "0" ]; then
+            SIZE_MB=$(echo "scale=2; $ZIP_SIZE / 1024 / 1024" | bc 2>/dev/null || echo "N/A")
             echo "**Size:** ${SIZE_MB} MB" >> $GITHUB_STEP_SUMMARY
           fi
           
-          if [ -n "${{ steps.create_zip.outputs.ZIP_SHA256 }}" ]; then
+          ZIP_SHA="${{ steps.create_zip.outputs.zip_sha256 }}"
+          if [ -n "$ZIP_SHA" ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**SHA256:** \`${{ steps.create_zip.outputs.ZIP_SHA256 }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "**SHA256:** \`$ZIP_SHA\`" >> $GITHUB_STEP_SUMMARY
           fi
         fi
         
@@ -1379,12 +1382,22 @@ runs:
           echo "- **Build Time:** ${BUILD_MIN}m ${BUILD_SEC}s" >> $GITHUB_STEP_SUMMARY
         fi
         
-        if [ -n "${{ steps.collect_stats.outputs.warnings_count }}" ]; then
-          echo "- **Warnings:** ${{ steps.collect_stats.outputs.warnings_count }}" >> $GITHUB_STEP_SUMMARY
+        WARNINGS="${{ steps.collect_stats.outputs.warnings_count }}"
+        if [ -n "$WARNINGS" ]; then
+          echo "- **Warnings:** $WARNINGS" >> $GITHUB_STEP_SUMMARY
         fi
         
         if [ -n "${CLANG_VERSION:-}" ]; then
           echo "- **Compiler:** ${CLANG_VERSION}" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        # Add checksums section
+        IMAGE_SHA="${{ steps.collect_stats.outputs.image_sha256 }}"
+        if [ -n "$IMAGE_SHA" ] || [ -n "$ZIP_SHA" ]; then
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔐 Checksums" >> $GITHUB_STEP_SUMMARY
+          [ -n "$IMAGE_SHA" ] && echo "- **Image SHA256:** \`$IMAGE_SHA\`" >> $GITHUB_STEP_SUMMARY
+          [ -n "$ZIP_SHA" ] && echo "- **ZIP SHA256:** \`$ZIP_SHA\`" >> $GITHUB_STEP_SUMMARY
         fi
         
         echo "" >> $GITHUB_STEP_SUMMARY
