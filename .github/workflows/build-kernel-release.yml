@@ -173,7 +173,7 @@ jobs:
             build-${{ matrix.model }}-${{ matrix.kernel_version }}-
             build-${{ matrix.model }}-
 
-      - name: Build
+      - name: Build Kernel
         id: build
         uses: ./.github/actions
         with:
@@ -185,12 +185,12 @@ jobs:
           optimize_level: ${{ inputs.optimize_level }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Validate
+      - name: Validate Outputs
         if: always()
         shell: bash
         run: |
           missing=0
-          for out in kernel_version sukisu_version susfs_version image_sha256 warnings_count zip_name; do
+          for out in kernel_version sukisu_version susfs_version image_sha256 warnings_count zip_name zip_size zip_sha256; do
             case "$out" in
               kernel_version) v="${{ steps.build.outputs.kernel_version }}" ;;
               sukisu_version) v="${{ steps.build.outputs.sukisu_version }}" ;;
@@ -198,12 +198,14 @@ jobs:
               image_sha256) v="${{ steps.build.outputs.image_sha256 }}" ;;
               warnings_count) v="${{ steps.build.outputs.warnings_count }}" ;;
               zip_name) v="${{ steps.build.outputs.zip_name }}" ;;
+              zip_size) v="${{ steps.build.outputs.zip_size }}" ;;
+              zip_sha256) v="${{ steps.build.outputs.zip_sha256 }}" ;;
             esac
-            [ -z "$v" ] && { echo "::error::Missing: $out"; ((missing++)); } || echo "✅ $out: $v"
+            [ -z "$v" ] && { echo "::error::Missing: $out"; ((missing++)); } || echo "✅ $out"
           done
           [ $missing -gt 0 ] && exit 1 || exit 0
 
-      - name: Summary
+      - name: Build Summary
         if: always()
         shell: bash
         run: |
@@ -220,18 +222,21 @@ jobs:
           | SUSFS | ${{ steps.build.outputs.susfs_version }} |
           | Warnings | ${{ steps.build.outputs.warnings_count }} |
           | Package | \`${{ steps.build.outputs.zip_name }}\` |
+          | Size | $(numfmt --to=iec-i --suffix=B ${{ steps.build.outputs.zip_size }} 2>/dev/null || echo "${{ steps.build.outputs.zip_size }}") |
           
           **Config:** Hook=\`${{ inputs.hook }}\` LSM=\`${{ inputs.lsm }}\` ZRAM=\`${{ inputs.enable_zram }}\` Opt=\`${{ inputs.optimize_level }}\`
           EOF
 
-      - name: Upload
+      - name: Upload Artifacts
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: kernel-${{ matrix.model }}-${{ matrix.android_version }}-${{ matrix.kernel_version }}
           path: |
-            ${{ matrix.model }}/artifacts/*.zip
-            ${{ matrix.model }}/artifacts/*.txt
+            ${{ matrix.model }}/artifacts/${{ steps.build.outputs.zip_name }}
+            ${{ matrix.model }}/artifacts/build_info.txt
           retention-days: 7
+          compression-level: 0
           if-no-files-found: error
 
       - name: Cleanup on Cancel
@@ -239,13 +244,7 @@ jobs:
         shell: bash
         run: |
           echo "::warning::Build cancelled for ${{ matrix.model }}"
-          echo "Cleaning up partial artifacts..."
-          
-          rm -rf "${{ matrix.model }}/artifacts" || true
-          rm -rf "${{ matrix.model }}/kernel_platform" || true
-          rm -rf "${{ matrix.model }}/out" || true
-          rm -rf "${{ matrix.model }}/downloads" || true
-          
+          rm -rf "${{ matrix.model }}/artifacts" "${{ matrix.model }}/kernel_platform" "${{ matrix.model }}/out" "${{ matrix.model }}/downloads" || true
           echo "✅ Cleanup completed"
 
   release:
@@ -254,7 +253,7 @@ jobs:
     if: ${{ inputs.make_release }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      RELEASE_NAME: '*TEST* OnePlus Kernels - SukiSU Ultra & SUSFS v1.5.12 *TEST*'
+      RELEASE_NAME: 'OnePlus Kernels - SukiSU Ultra & SUSFS v1.5.12'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -262,10 +261,11 @@ jobs:
           fetch-depth: 0
           
       - name: Generate Tag
+        shell: bash
         run: |
           BASE="v1.5.12-r0"
           LATEST=$(gh api repos/${{ github.repository }}/tags \
-            --jq '[.[] | select(.name | startswith("v1.5.12-r")) | .name] | .[0]' || echo "")
+            --jq '[.[] | select(.name | startswith("v1.5.12-r")) | .name] | .[0]' 2>/dev/null || echo "")
           
           if [ -z "$LATEST" ]; then
             NEW_TAG="$BASE"
@@ -275,6 +275,8 @@ jobs:
           fi
           
           echo "NEW_TAG=$NEW_TAG" >> $GITHUB_ENV
+          echo "📌 New tag: $NEW_TAG"
+          
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
@@ -283,48 +285,93 @@ jobs:
       - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
-          path: ./artifacts
+          path: ./all-artifacts
 
-      - name: Generate Notes
+      - name: Organize Assets
+        shell: bash
         run: |
-          cat << EOF > notes.md
-          SukiSU Ultra with SUSFS v1.5.12
+          set -euo pipefail
+          
+          mkdir -p ./release-assets
+          
+          echo "Organizing artifacts..."
+          find ./all-artifacts -name "*.zip" -type f | while read -r zip; do
+            filename=$(basename "$zip")
+            echo "  Found: $filename"
+            cp "$zip" "./release-assets/$filename"
+          done
+          
+          find ./all-artifacts -name "build_info.txt" -type f | while read -r info; do
+            model=$(echo "$info" | sed -n 's|.*/kernel-\([^/]*\)-android.*/.*|\1|p')
+            [ -n "$model" ] && cp "$info" "./release-assets/build_info_${model}.txt"
+          done
+          
+          echo ""
+          echo "Release assets:"
+          ls -lh ./release-assets/
+          
+          zip_count=$(find ./release-assets -name "*.zip" -type f | wc -l)
+          [ "$zip_count" -eq 0 ] && { echo "::error::No ZIPs found!"; exit 1; }
+          
+          echo "✅ Found $zip_count kernel ZIP(s)"
+
+      - name: Generate Release Notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          
+          cat << 'EOF' > notes.md
+          # 🚀 SukiSU Ultra with SUSFS v1.5.12
           
           **Module:** https://github.com/sidex15/ksu_module_susfs  
           **Manager:** https://github.com/SukiSU-Ultra/SukiSU-Ultra  
           
-          ### Built Devices
-          | Model | Version |
-          |-------|---------|
+          ## 📱 Built Devices
+          
+          | Device | Kernel | SukiSU | SUSFS | Android | Base |
+          |--------|--------|--------|-------|---------|------|
           EOF
           
-          # Extract model names from artifact directories
-          find artifacts -name "*.txt" -type f | sort | while read f; do
-            # Get model name from parent directory (kernel-MODEL-android-version)
-            dir=$(dirname "$f")
-            model=$(basename "$dir" | sed 's/kernel-\([^-]*\)-.*/\1/')
-            version=$(cat "$f" 2>/dev/null || echo "unknown")
-            printf "| %-20s | %-30s |\n" "$model" "$version" >> notes.md
+          find ./release-assets -name "build_info_*.txt" -type f | sort | while read -r info; do
+            model=$(basename "$info" | sed 's/build_info_\(.*\)\.txt/\1/')
+            kernel_ver=$(grep "^Kernel Version:" "$info" | cut -d: -f2- | xargs || echo "?")
+            sukisu_ver=$(grep "^SukiSU Version:" "$info" | cut -d: -f2- | xargs || echo "?")
+            susfs_ver=$(grep "^SUSFS Version:" "$info" | cut -d: -f2- | xargs || echo "?")
+            android_ver=$(grep "^Android Version:" "$info" | cut -d: -f2- | xargs || echo "?")
+            kernel_base=$(grep "^Kernel Base:" "$info" | cut -d: -f2- | xargs || echo "?")
+            
+            printf "| %-12s | %-18s | %-8s | %-8s | %-8s | %-8s |\n" \
+              "$model" "$kernel_ver" "$sukisu_ver" "$susfs_ver" "$android_ver" "$kernel_base" >> notes.md
           done
           
           cat << 'EOF' >> notes.md
           
-          ### Features
-          - SukiSU Ultra Manager
-          - SUSFS v1.5.12
-          - Wireguard
-          - Magic Mount
-          - Ptrace fix (<5.16)
-          - Manual/Kprobe/Tracepoint Hooks
-          - TMPFS_XATTR [Mountify]
-          - BBR v1
-          - HMBIRD scx (6.6)
-          - BBG (optional)
-          - ZRAM algorithms (optional)
-          - IP Set
+          ## ✨ Features
+          - ⚡ SukiSU Ultra Manager
+          - 🛡️ SUSFS v1.5.12
+          - 🔐 Magic Mount
+          - 🔒 WireGuard
+          - 🚀 BBR v1
+          - 🐛 Ptrace fix (<5.16)
+          - 🎯 Manual/Kprobe/Tracepoint Hooks
+          - 💾 ZRAM algorithms (optional)
+          - ⚙️ BBG LSM (optional)
+          
+          ## 📥 Installation
+          1. Download ZIP for your device
+          2. Reboot to recovery
+          3. Flash ZIP
+          4. Reboot
+          5. Install SukiSU Ultra Manager
+          
+          ---
+          **Build:** $(date -u '+%Y-%m-%d %H:%M UTC') | Run #${{ github.run_number }}
           EOF
+          
+          cat notes.md
 
       - name: Create Release
+        shell: bash
         run: |
           for i in {1..3}; do
             gh release create "${{ env.NEW_TAG }}" \
@@ -338,53 +385,52 @@ jobs:
           exit 1
 
       - name: Upload Assets
+        shell: bash
         run: |
-          expected=$(find artifacts -name "*.zip" -type f | wc -l)
+          set -euo pipefail
+          
+          expected=$(find ./release-assets -name "*.zip" -type f | wc -l)
           uploaded=0
           
-          find artifacts -name "*.zip" -type f | while read zip; do
-            name=$(basename "$zip")
+          find ./release-assets -name "*.zip" -type f | sort | while read -r zip; do
+            filename=$(basename "$zip")
             
             for i in {1..3}; do
               if gh release upload "${{ env.NEW_TAG }}" "$zip" \
                  --repo "${{ github.repository }}" --clobber; then
-                echo "✅ $name"
+                echo "✅ $filename"
                 ((uploaded++))
                 break
               fi
-              echo "⚠️ Retry $i/3: $name"
+              echo "⚠️ Retry $i/3: $filename"
               sleep 5
             done
           done
           
-          # Verify all assets uploaded
           actual=$(gh release view "${{ env.NEW_TAG }}" \
             --repo "${{ github.repository }}" \
             --json assets --jq '.assets | length')
           
-          echo "Expected: $expected | Uploaded: $actual"
-          
-          if [ "$actual" -eq 0 ]; then
-            echo "::error::No assets in release!"
-            exit 1
-          fi
-          
+          echo "Expected: $expected | In Release: $actual"
+          [ "$actual" -eq 0 ] && { echo "::error::No assets!"; exit 1; }
           echo "✅ Release has $actual asset(s)"
 
       - name: Release Summary
         if: always()
+        shell: bash
         run: |
-          cat >> $GITHUB_STEP_SUMMARY << EOF
-          # 🎉 Release: ${{ env.NEW_TAG }}
+          status="${{ job.status }}"
+          [ "$status" = "success" ] && emoji="✅" || emoji="❌"
           
-          **Status:** ${{ job.status }}  
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # $emoji Release: ${{ env.NEW_TAG }}
+          
+          **Status:** $status  
           **URL:** https://github.com/${{ github.repository }}/releases/tag/${{ env.NEW_TAG }}
           
           ## Assets
-          | File | Size |
-          |------|------|
           EOF
           
-          find artifacts -name "*.zip" -type f | while read f; do
-            echo "| \`$(basename "$f")\` | $(stat -c%s "$f" | numfmt --to=iec-i --suffix=B) |" >> $GITHUB_STEP_SUMMARY
-          done
+          find ./release-assets -name "*.zip" -type f 2>/dev/null | while read -r f; do
+            echo "- \`$(basename "$f")\` ($(stat -c%s "$f" | numfmt --to=iec-i --suffix=B))" >> $GITHUB_STEP_SUMMARY
+          done || echo "- No assets found" >> $GITHUB_STEP_SUMMARY
