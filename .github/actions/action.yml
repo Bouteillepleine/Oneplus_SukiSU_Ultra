@@ -1540,6 +1540,9 @@ runs:
         ARTIFACTS_DIR="$GITHUB_WORKSPACE/${{ env.CONFIG }}/artifacts"
         ZIP_FILE="$ARTIFACTS_DIR/${{ steps.create_zip.outputs.zip_name }}"
         
+        # ============================================
+        # 1. Check ZIP file exists
+        # ============================================
         if [ ! -f "$ZIP_FILE" ]; then
           echo "::error::ZIP file not found: $ZIP_FILE"
           exit 1
@@ -1547,8 +1550,9 @@ runs:
         
         echo "Verifying: $(basename "$ZIP_FILE")"
         
-        # Check minimum ZIP size (8MB is reasonable for kernel + AK3)
-        # Lower to 6MB if you support very minimal builds
+        # ============================================
+        # 2. Validate ZIP size
+        # ============================================
         MIN_ZIP_SIZE=8388608  # 8 MB
         ZIP_SIZE=$(stat -c%s "$ZIP_FILE" 2>/dev/null || echo "0")
         
@@ -1559,7 +1563,9 @@ runs:
         
         echo "✅ ZIP size valid: $(numfmt --to=iec-i --suffix=B "$ZIP_SIZE")"
         
-        # Test ZIP integrity
+        # ============================================
+        # 3. Test ZIP integrity
+        # ============================================
         echo ""
         echo "Testing ZIP integrity..."
         if ! unzip -t "$ZIP_FILE" >/dev/null 2>&1; then
@@ -1569,41 +1575,125 @@ runs:
         
         echo "✅ ZIP integrity test passed"
         
-        # Check for unwanted nested archives (allow ksu_module_susfs*.zip)
+        # ============================================
+        # 4. Extract file list (single pass)
+        # ============================================
+        echo ""
+        echo "Extracting file list..."
+        
+        # Use a single unzip call and parse output efficiently
+        mapfile -t ALL_FILES < <(unzip -l "$ZIP_FILE" 2>/dev/null | \
+          awk '
+            BEGIN { in_list = 0 }
+            /^Archive:/ { next }
+            /^  Length/ { in_list = 1; next }
+            /^---------/ { 
+              if (in_list) in_list = 2
+              next 
+            }
+            in_list == 2 && NF >= 4 { 
+              # Extract filename (everything from 4th field onwards)
+              filename = ""
+              for (i=4; i<=NF; i++) {
+                filename = filename (i==4 ? "" : " ") $i
+              }
+              if (filename != "") print filename
+            }
+          ')
+        
+        if [ ${#ALL_FILES[@]} -eq 0 ]; then
+          echo "::error::Failed to extract file list from ZIP"
+          exit 1
+        fi
+        
+        echo "Found ${#ALL_FILES[@]} entries in ZIP"
+        
+        # ============================================
+        # 5. Check for unwanted nested archives
+        # ============================================
         echo ""
         echo "Checking for unwanted nested archives..."
-        UNWANTED_ARCHIVES=$(unzip -l "$ZIP_FILE" | \
-          grep -iE '\.(zip|tar|tar\.gz|tar\.xz|tgz|7z|rar)$' | \
-          grep -vF "ksu_module_susfs" || true)
         
-        if [ -n "$UNWANTED_ARCHIVES" ]; then
-          echo "::error::❌ Unwanted nested archive detected inside ZIP!"
-          echo ""
-          echo "Problematic files:"
-          echo "$UNWANTED_ARCHIVES"
+        UNWANTED=()
+        SUSFS_FOUND=false
+        
+        for file in "${ALL_FILES[@]}"; do
+          # Skip directories
+          [[ "$file" == */ ]] && continue
+          
+          # Check if it's an archive
+          if [[ "$file" =~ \.(zip|tar|tar\.gz|tar\.xz|tgz|7z|rar)$ ]]; then
+            # Check if it's an allowed SUSFS module
+            case "$file" in
+              ksu_module_susfs*.zip)
+                SUSFS_FOUND=true
+                echo "  ✓ Allowed: $file"
+                ;;
+              modules/ksu_module_susfs*.zip)
+                SUSFS_FOUND=true
+                echo "  ✓ Allowed: $file"
+                ;;
+              */ksu_module_susfs*.zip)
+                SUSFS_FOUND=true
+                echo "  ✓ Allowed: $file"
+                ;;
+              *)
+                UNWANTED+=("$file")
+                ;;
+            esac
+          fi
+        done
+        
+        if [ ${#UNWANTED[@]} -gt 0 ]; then
+          echo "::error::❌ Unwanted nested archives detected:"
+          printf '  - %s\n' "${UNWANTED[@]}"
           exit 1
         fi
         
         echo "✅ No unwanted nested archives found"
         
-        # Verify required files are present
+        # ============================================
+        # 6. Verify SUSFS module (if downloaded)
+        # ============================================
+        if [ "${susfs_module_downloaded:-false}" = "true" ]; then
+          echo ""
+          echo "Verifying SUSFS module presence..."
+          
+          if [ "$SUSFS_FOUND" = true ]; then
+            # Find and display the exact path
+            for file in "${ALL_FILES[@]}"; do
+              if [[ "$file" =~ ksu_module_susfs.*\.zip$ ]]; then
+                echo "  ✅ SUSFS module found: $file"
+              fi
+            done
+          else
+            echo "::warning::SUSFS module was downloaded but not found in ZIP"
+            echo "Expected pattern: ksu_module_susfs*.zip"
+          fi
+        fi
+        
+        # ============================================
+        # 7. Verify required files
+        # ============================================
         echo ""
         echo "Verifying required files..."
+        
         REQUIRED_FILES=("Image" "anykernel.sh")
         MISSING_FILES=()
         
-        for file in "${REQUIRED_FILES[@]}"; do
-          if ! unzip -l "$ZIP_FILE" | grep -qF "$file"; then
-            MISSING_FILES+=("$file")
+        for req_file in "${REQUIRED_FILES[@]}"; do
+          found=false
+          for file in "${ALL_FILES[@]}"; do
+            if [ "$file" = "$req_file" ]; then
+              found=true
+              break
+            fi
+          done
+          
+          if [ "$found" = false ]; then
+            MISSING_FILES+=("$req_file")
           fi
         done
-        
-        # Check for META-INF (warn if missing, don't fail)
-        if ! unzip -l "$ZIP_FILE" | grep -qF "META-INF/"; then
-          echo "⚠️ Warning: META-INF/ not found (may be intentional for some recovery variants)"
-        else
-          echo "✅ META-INF/ found"
-        fi
         
         if [ ${#MISSING_FILES[@]} -gt 0 ]; then
           echo "::error::Required files missing:"
@@ -1613,33 +1703,69 @@ runs:
         
         echo "✅ All required files present"
         
-        # Check if SUSFS module is present (if it was downloaded)
-        if [ "${susfs_module_downloaded:-false}" = "true" ]; then
-          echo ""
-          echo "Checking for SUSFS module..."
-          if unzip -l "$ZIP_FILE" | grep -qF "ksu_module_susfs"; then
-            echo "✅ SUSFS module found in ZIP"
-          else
-            echo "::warning::SUSFS module was downloaded but not found in ZIP"
+        # ============================================
+        # 8. Check for META-INF (optional)
+        # ============================================
+        META_INF_FOUND=false
+        for file in "${ALL_FILES[@]}"; do
+          if [[ "$file" == META-INF/* ]]; then
+            META_INF_FOUND=true
+            break
           fi
+        done
+        
+        if [ "$META_INF_FOUND" = true ]; then
+          echo "✅ META-INF/ found"
+        else
+          echo "⚠️ Warning: META-INF/ not found (may be intentional for some recovery variants)"
         fi
         
-        # Count total files
-        TOTAL_FILES=$(unzip -l "$ZIP_FILE" | grep -c "^-" || echo "0")
+        # ============================================
+        # 9. Display statistics
+        # ============================================
         echo ""
         echo "📊 ZIP Statistics:"
-        echo "   - Total files: $TOTAL_FILES"
+        echo "   - Total entries: ${#ALL_FILES[@]}"
         echo "   - Compressed size: $(numfmt --to=iec-i --suffix=B "$ZIP_SIZE")"
         
-        # Show ZIP contents summary
-        echo ""
-        echo "ZIP contents summary:"
-        unzip -l "$ZIP_FILE" | tail -1
+        # Count files vs directories
+        FILE_COUNT=0
+        DIR_COUNT=0
+        for file in "${ALL_FILES[@]}"; do
+          if [[ "$file" == */ ]]; then
+            ((DIR_COUNT++))
+          else
+            ((FILE_COUNT++))
+          fi
+        done
         
-        # Show top-level structure
+        echo "   - Files: $FILE_COUNT"
+        echo "   - Directories: $DIR_COUNT"
+        
+        # ============================================
+        # 10. Show structure preview
+        # ============================================
         echo ""
-        echo "Top-level structure:"
-        unzip -l "$ZIP_FILE" | grep -E "^-|/$" | head -20
+        echo "Top-level structure (first 20 entries):"
+        
+        count=0
+        for file in "${ALL_FILES[@]}"; do
+          [ $count -ge 20 ] && break
+          echo "  $file"
+          ((count++))
+        done
+        
+        if [ ${#ALL_FILES[@]} -gt 20 ]; then
+          echo "  ... and $((${#ALL_FILES[@]} - 20)) more entries"
+        fi
+        
+        # ============================================
+        # 11. Final summary
+        # ============================================
+        echo ""
+        echo "============================================"
+        echo "✅ Package integrity verification passed"
+        echo "============================================"
         
         echo "::endgroup::" 
 
