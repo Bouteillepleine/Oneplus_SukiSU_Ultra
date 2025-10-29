@@ -1331,7 +1331,7 @@ runs:
         path: ZRAM-Module/
         retention-days: 30
 
-    - name: Generate Build Summary
+        - name: Generate Build Summary
       if: always()
       shell: bash
       run: |
@@ -1353,12 +1353,12 @@ runs:
         echo "| **BBG LSM** | ${{ inputs.lsm }} |" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        if [ -n "${{ steps.create_zip.outputs.zip_name }}" ]; then
+        ZIP_NAME="${{ steps.create_zip.outputs.zip_name }}"
+        if [ -n "$ZIP_NAME" ]; then
           echo "### 📥 Download" >> $GITHUB_STEP_SUMMARY
-          echo "**Filename:** \`${{ steps.create_zip.outputs.zip_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Filename:** \`$ZIP_NAME\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          # Use lowercase output names and add safety checks
           ZIP_SIZE="${{ steps.create_zip.outputs.zip_size }}"
           if [ -n "$ZIP_SIZE" ] && [ "$ZIP_SIZE" != "0" ]; then
             SIZE_MB=$(echo "scale=2; $ZIP_SIZE / 1024 / 1024" | bc 2>/dev/null || echo "N/A")
@@ -1393,11 +1393,11 @@ runs:
         
         # Add checksums section
         IMAGE_SHA="${{ steps.collect_stats.outputs.image_sha256 }}"
-        if [ -n "$IMAGE_SHA" ] || [ -n "$ZIP_SHA" ]; then
+        if [ -n "$IMAGE_SHA" ] || [ -n "${ZIP_SHA:-}" ]; then
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### 🔐 Checksums" >> $GITHUB_STEP_SUMMARY
           [ -n "$IMAGE_SHA" ] && echo "- **Image SHA256:** \`$IMAGE_SHA\`" >> $GITHUB_STEP_SUMMARY
-          [ -n "$ZIP_SHA" ] && echo "- **ZIP SHA256:** \`$ZIP_SHA\`" >> $GITHUB_STEP_SUMMARY
+          [ -n "${ZIP_SHA:-}" ] && echo "- **ZIP SHA256:** \`$ZIP_SHA\`" >> $GITHUB_STEP_SUMMARY
         fi
         
         echo "" >> $GITHUB_STEP_SUMMARY
