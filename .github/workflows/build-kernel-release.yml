@@ -74,6 +74,10 @@ on:
         options: [O2, O3]
         default: O2
 
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.event.inputs.op_model }}
+  cancel-in-progress: true
+
 jobs:
   set-op-model:
     runs-on: ubuntu-latest
@@ -149,12 +153,25 @@ jobs:
     name: ${{ matrix.model }}
     needs: set-op-model
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.set-op-model.outputs.matrix) }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Setup Build Cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.ccache
+            ${{ matrix.model }}/kernel_platform/prebuilts
+            ${{ matrix.model }}/kernel_platform/prebuilts-master
+          key: build-${{ matrix.model }}-${{ matrix.kernel_version }}-${{ hashFiles('configs/${{ matrix.model }}.json') }}
+          restore-keys: |
+            build-${{ matrix.model }}-${{ matrix.kernel_version }}-
+            build-${{ matrix.model }}-
 
       - name: Build
         id: build
@@ -177,7 +194,8 @@ jobs:
             case "$out" in
               kernel_version) v="${{ steps.build.outputs.kernel_version }}" ;;
               sukisu_version) v="${{ steps.build.outputs.sukisu_version }}" ;;
-              susfs_version) v="${{ steps.build.outputs.susfs_version }}" ;;              
+              susfs_version) v="${{ steps.build.outputs.susfs_version }}" ;;
+              image_sha256) v="${{ steps.build.outputs.image_sha256 }}" ;;
               warnings_count) v="${{ steps.build.outputs.warnings_count }}" ;;
               zip_name) v="${{ steps.build.outputs.zip_name }}" ;;
             esac
@@ -215,6 +233,20 @@ jobs:
             ${{ matrix.model }}/artifacts/*.txt
           retention-days: 7
           if-no-files-found: error
+
+      - name: Cleanup on Cancel
+        if: cancelled()
+        shell: bash
+        run: |
+          echo "::warning::Build cancelled for ${{ matrix.model }}"
+          echo "Cleaning up partial artifacts..."
+          
+          rm -rf "${{ matrix.model }}/artifacts" || true
+          rm -rf "${{ matrix.model }}/kernel_platform" || true
+          rm -rf "${{ matrix.model }}/out" || true
+          rm -rf "${{ matrix.model }}/downloads" || true
+          
+          echo "✅ Cleanup completed"
 
   release:
     needs: build
@@ -302,6 +334,9 @@ jobs:
 
       - name: Upload Assets
         run: |
+          expected=$(find artifacts -name "*.zip" -type f | wc -l)
+          uploaded=0
+          
           find artifacts -name "*.zip" -type f | while read zip; do
             name=$(basename "$zip")
             
@@ -309,6 +344,7 @@ jobs:
               if gh release upload "${{ env.NEW_TAG }}" "$zip" \
                  --repo "${{ github.repository }}" --clobber; then
                 echo "✅ $name"
+                ((uploaded++))
                 break
               fi
               echo "⚠️ Retry $i/3: $name"
@@ -316,17 +352,19 @@ jobs:
             done
           done
           
-          # Simple verification
-          uploaded=$(gh release view "${{ env.NEW_TAG }}" \
+          # Verify all assets uploaded
+          actual=$(gh release view "${{ env.NEW_TAG }}" \
             --repo "${{ github.repository }}" \
             --json assets --jq '.assets | length')
           
-          echo "✅ Release has $uploaded asset(s)"
+          echo "Expected: $expected | Uploaded: $actual"
           
-          if [ "$uploaded" -eq 0 ]; then
+          if [ "$actual" -eq 0 ]; then
             echo "::error::No assets in release!"
             exit 1
           fi
+          
+          echo "✅ Release has $actual asset(s)"
 
       - name: Release Summary
         if: always()
