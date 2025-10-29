@@ -185,48 +185,25 @@ jobs:
           optimize_level: ${{ inputs.optimize_level }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Validate Outputs
+      - name: Validate
         if: always()
         shell: bash
         run: |
           missing=0
-          
-          # Check required outputs
-          for out in kernel_version sukisu_version susfs_version warnings_count; do
+          for out in kernel_version sukisu_version susfs_version image_sha256 warnings_count zip_name; do
             case "$out" in
               kernel_version) v="${{ steps.build.outputs.kernel_version }}" ;;
               sukisu_version) v="${{ steps.build.outputs.sukisu_version }}" ;;
               susfs_version) v="${{ steps.build.outputs.susfs_version }}" ;;
-              warnings_count) v="${{ steps.build.outputs.warnings_count }}" ;;
-            esac
-            
-            if [ -z "$v" ] || [ "$v" = "unknown" ]; then
-              echo "::error::Missing or invalid required output: $out (value: '$v')"
-              ((missing++))
-            else
-              echo "✅ $out: $v"
-            fi
-          done
-          
-          # Check optional outputs (warnings only)
-          for out in image_sha256 zip_name zip_size zip_sha256; do
-            case "$out" in
               image_sha256) v="${{ steps.build.outputs.image_sha256 }}" ;;
+              warnings_count) v="${{ steps.build.outputs.warnings_count }}" ;;
               zip_name) v="${{ steps.build.outputs.zip_name }}" ;;
-              zip_size) v="${{ steps.build.outputs.zip_size }}" ;;
-              zip_sha256) v="${{ steps.build.outputs.zip_sha256 }}" ;;
             esac
-            
-            if [ -z "$v" ]; then
-              echo "::warning::Optional output missing: $out"
-            else
-              echo "✅ $out: $v"
-            fi
+            [ -z "$v" ] && { echo "::error::Missing: $out"; ((missing++)); } || echo "✅ $out: $v"
           done
-          
           [ $missing -gt 0 ] && exit 1 || exit 0
 
-      - name: Build Summary
+      - name: Summary
         if: always()
         shell: bash
         run: |
@@ -238,27 +215,16 @@ jobs:
           
           | Property | Value |
           |----------|-------|
-          | **Kernel** | \`${{ steps.build.outputs.kernel_version }}\` |
-          | **SukiSU** | \`${{ steps.build.outputs.sukisu_version }}\` |
-          | **SUSFS** | \`${{ steps.build.outputs.susfs_version }}\` |
-          | **Warnings** | ${{ steps.build.outputs.warnings_count }} |
-          | **Package** | \`${{ steps.build.outputs.zip_name }}\` |
-          | **Size** | $(echo "${{ steps.build.outputs.zip_size }}" | numfmt --to=iec-i --suffix=B 2>/dev/null || echo "N/A") |
+          | Kernel | ${{ steps.build.outputs.kernel_version }} |
+          | SukiSU | ${{ steps.build.outputs.sukisu_version }} |
+          | SUSFS | ${{ steps.build.outputs.susfs_version }} |
+          | Warnings | ${{ steps.build.outputs.warnings_count }} |
+          | Package | \`${{ steps.build.outputs.zip_name }}\` |
           
           **Config:** Hook=\`${{ inputs.hook }}\` LSM=\`${{ inputs.lsm }}\` ZRAM=\`${{ inputs.enable_zram }}\` Opt=\`${{ inputs.optimize_level }}\`
-          
-          <details>
-          <summary>🔐 Checksums</summary>
-          
-          \`\`\`
-          Image:  ${{ steps.build.outputs.image_sha256 }}
-          ZIP:    ${{ steps.build.outputs.zip_sha256 }}
-          \`\`\`
-          </details>
           EOF
 
-      - name: Upload Artifacts
-        if: success()
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: kernel-${{ matrix.model }}-${{ matrix.android_version }}-${{ matrix.kernel_version }}
@@ -332,10 +298,13 @@ jobs:
           |-------|---------|
           EOF
           
+          # Extract model names from artifact directories
           find artifacts -name "*.txt" -type f | sort | while read f; do
-            model=$(basename "$(dirname "$f")" | sed 's/kernel-\(.*\)-android.*/\1/')
+            # Get model name from parent directory (kernel-MODEL-android-version)
+            dir=$(dirname "$f")
+            model=$(basename "$dir" | sed 's/kernel-\([^-]*\)-.*/\1/')
             version=$(cat "$f" 2>/dev/null || echo "unknown")
-            printf "| %-12s | %-16s |\n" "$model" "$version" >> notes.md
+            printf "| %-20s | %-30s |\n" "$model" "$version" >> notes.md
           done
           
           cat << 'EOF' >> notes.md
@@ -417,6 +386,5 @@ jobs:
           EOF
           
           find artifacts -name "*.zip" -type f | while read f; do
-            size=$(stat -c%s "$f" 2>/dev/null | numfmt --to=iec-i --suffix=B || echo "N/A")
-            echo "| \`$(basename "$f")\` | $size |" >> $GITHUB_STEP_SUMMARY
+            echo "| \`$(basename "$f")\` | $(stat -c%s "$f" | numfmt --to=iec-i --suffix=B) |" >> $GITHUB_STEP_SUMMARY
           done
