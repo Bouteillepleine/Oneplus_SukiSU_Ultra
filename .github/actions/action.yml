@@ -44,6 +44,15 @@ outputs:
   zip_name:
     description: 'Created ZIP filename'
     value: ${{ steps.create_zip.outputs.zip_name }}
+  zip_size:
+    description: 'ZIP file size in bytes'
+    value: ${{ steps.create_zip.outputs.zip_size }}
+  zip_sha256:
+    description: 'ZIP file SHA256 checksum'
+    value: ${{ steps.create_zip.outputs.zip_sha256 }}
+  image_sha256:
+    description: 'Kernel Image SHA256 checksum'
+    value: ${{ steps.collect_stats.outputs.image_sha256 }}
 
 runs:
   using: composite
@@ -464,6 +473,11 @@ runs:
         echo "Manager Version: $KSU_VERSION"
         grep -A 10 "REPO_OWNER" kernel/Makefile || true
         echo "::endgroup::"
+
+        echo "SUKISUVER=$KSU_VERSION" >> "$GITHUB_ENV"
+        
+        # Also export the full version string
+        echo "KSU_VERSION_FULL=$VERSION_FULL" >> "$GITHUB_ENV"
     
         echo "✅ SukiSU Ultra successfully added"
         echo "   Version: $VERSION_FULL"
@@ -1019,28 +1033,65 @@ runs:
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
         
-        KERNEL_VERSION="${KERNEL_FULL_VER:-unknown}"
-        SUKISU_VERSION="${SUKISUVER:-unknown}"
-        SUSFS_VERSION="${SUSVER:-unknown}"
-        
-        if [ -z "$KERNEL_VERSION" ] || [ "$KERNEL_VERSION" = "unknown" ]; then
-          echo "::warning::KERNEL_FULL_VER not set, using fallback"
+        # Get kernel version with proper fallback
+        if [ -n "${KERNEL_FULL_VER:-}" ]; then
+          KERNEL_VERSION="$KERNEL_FULL_VER"
+        else
+          echo "::warning::KERNEL_FULL_VER not set, attempting to detect..."
           KERNEL_VERSION="unknown"
+          COMMON_DIR="$CONFIG_DIR/kernel_platform/common"
+          if [ -f "$COMMON_DIR/Makefile" ]; then
+            VERSION=$(grep '^VERSION *=' "$COMMON_DIR/Makefile" | awk '{print $3}')
+            PATCHLEVEL=$(grep '^PATCHLEVEL *=' "$COMMON_DIR/Makefile" | awk '{print $3}')
+            SUBLEVEL=$(grep '^SUBLEVEL *=' "$COMMON_DIR/Makefile" | awk '{print $3}')
+            if [ -n "$VERSION" ] && [ -n "$PATCHLEVEL" ] && [ -n "$SUBLEVEL" ]; then
+              KERNEL_VERSION="${ANDROID_VER:-unknown}-$VERSION.$PATCHLEVEL.$SUBLEVEL"
+            fi
+          fi
         fi
         
-        if [ -z "$SUKISU_VERSION" ] || [ "$SUKISU_VERSION" = "unknown" ]; then
-          echo "::warning::SUKISUVER not set, using fallback"
+        # Get SukiSU version with proper fallback
+        if [ -n "${SUKISUVER:-}" ]; then
+          SUKISU_VERSION="$SUKISUVER"
+        else
+          echo "::warning::SUKISUVER not set, using default"
           SUKISU_VERSION="unknown"
         fi
         
-        if [ -z "$SUSFS_VERSION" ] || [ "$SUSFS_VERSION" = "unknown" ]; then
-          echo "::warning::SUSVER not set, using fallback"
+        # Get SUSFS version with proper fallback
+        if [ -n "${SUSVER:-}" ]; then
+          SUSFS_VERSION="$SUSVER"
+        elif [ -n "${SUSFS_VERSION:-}" ]; then
+          SUSFS_VERSION="$SUSFS_VERSION"
+        else
+          echo "::warning::SUSFS version not set, attempting to detect..."
           SUSFS_VERSION="unknown"
+          SUSFS_HEADER="$GITHUB_WORKSPACE/susfs4ksu/kernel_patches/include/linux/susfs.h"
+          if [ -f "$SUSFS_HEADER" ]; then
+            DETECTED_VER=$(grep '#define SUSFS_VERSION' "$SUSFS_HEADER" | awk -F'"' '{print $2}')
+            if [ -n "$DETECTED_VER" ]; then
+              SUSFS_VERSION="$DETECTED_VER"
+            fi
+          fi
         fi
         
-        printf 'kernel_version=%s\n' "$KERNEL_VERSION" >> "$GITHUB_OUTPUT"
-        printf 'sukisu_version=%s\n' "$SUKISU_VERSION" >> "$GITHUB_OUTPUT"
-        printf 'susfs_version=%s\n' "$SUSFS_VERSION" >> "$GITHUB_OUTPUT"
+        # Save to outputs
+        echo "kernel_version=$KERNEL_VERSION" >> "$GITHUB_OUTPUT"
+        echo "sukisu_version=$SUKISU_VERSION" >> "$GITHUB_OUTPUT"
+        echo "susfs_version=$SUSFS_VERSION" >> "$GITHUB_OUTPUT"
+        
+        # Also save to environment for later steps
+        echo "FINAL_KERNEL_VERSION=$KERNEL_VERSION" >> "$GITHUB_ENV"
+        echo "FINAL_SUKISU_VERSION=$SUKISU_VERSION" >> "$GITHUB_ENV"
+        echo "FINAL_SUSFS_VERSION=$SUSFS_VERSION" >> "$GITHUB_ENV"
+        
+        # Save to file for artifact
+        cat > "$ARTIFACTS_DIR/build_info.txt" << EOF
+        Kernel Version: $KERNEL_VERSION
+        SukiSU Version: $SUKISU_VERSION
+        SUSFS Version: $SUSFS_VERSION
+        Build Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+        EOF
         
         echo "✅ Metadata saved:"
         echo "   - Kernel: $KERNEL_VERSION"
@@ -1058,13 +1109,14 @@ runs:
         OUT="$COMMON/out"
         IMG="$OUT/arch/arm64/boot/Image"
         
+        # Count warnings
         if [ -f "$COMMON/build.log" ]; then
-          WARNINGS_COUNT="$(grep -ciE '\bwarning:' "$COMMON/build.log" || true)"
-          [ -n "$WARNINGS_COUNT" ] || WARNINGS_COUNT="0"
+          WARNINGS_COUNT="$(grep -ciE '\bwarning:' "$COMMON/build.log" || echo "0")"
         else
           WARNINGS_COUNT="0"
         fi
         
+        # Validate image
         if [ ! -f "$IMG" ]; then
           echo "::error::Kernel Image not found at: $IMG"
           exit 1
@@ -1083,11 +1135,23 @@ runs:
           exit 1
         fi
         
-        printf 'warnings_count=%s\n' "$WARNINGS_COUNT" >> "$GITHUB_OUTPUT"
+        IMG_SHA256=$(sha256sum "$IMG" | awk '{print $1}')
+        
+        # Save to outputs
+        echo "warnings_count=$WARNINGS_COUNT" >> "$GITHUB_OUTPUT"
+        echo "image_size=$IMG_SIZE" >> "$GITHUB_OUTPUT"
+        echo "image_sha256=$IMG_SHA256" >> "$GITHUB_OUTPUT"
+        
+        # Save to environment
+        echo "WARNINGS_COUNT=$WARNINGS_COUNT" >> "$GITHUB_ENV"
+        echo "IMAGE_SIZE=$IMG_SIZE" >> "$GITHUB_ENV"
+        echo "IMAGE_SHA256=$IMG_SHA256" >> "$GITHUB_ENV"
         
         echo "✅ Validation passed:"
         echo "   - Warnings: $WARNINGS_COUNT"
         echo "   - Image size: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")"
+        echo "   - Image SHA256: $IMG_SHA256"
+
 
     - name: Download and Package ZRAM Module
       if: ${{ inputs.enable_zram == 'true' }}
@@ -1211,7 +1275,12 @@ runs:
           ZRAM_SUFFIX="_ZRAM"
         fi
         
-        ZIP_NAME="AnyKernel3_${OP_MODEL}_${{ env.KERNEL_FULL_VER }}_SukiSU_${SUKISUVER}_${SUSVER}${ZRAM_SUFFIX}.zip"
+        # Use saved metadata with fallbacks
+        KERNEL_VER="${FINAL_KERNEL_VERSION:-${KERNEL_FULL_VER:-unknown}}"
+        SUKISU_VER="${FINAL_SUKISU_VERSION:-${SUKISUVER:-unknown}}"
+        SUSFS_VER="${FINAL_SUSFS_VERSION:-${SUSVER:-unknown}}"
+        
+        ZIP_NAME="AnyKernel3_${OP_MODEL}_${KERNEL_VER}_SukiSU_${SUKISU_VER}_${SUSFS_VER}${ZRAM_SUFFIX}.zip"
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
         
@@ -1229,15 +1298,22 @@ runs:
         ZIP_SIZE=$(stat -c%s "$ARTIFACTS_DIR/$ZIP_NAME")
         ZIP_SHA256=$(sha256sum "$ARTIFACTS_DIR/$ZIP_NAME" | awk '{print $1}')
         
+        # Save outputs
         echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
-        echo "ZIP_SIZE=$ZIP_SIZE" >> "$GITHUB_OUTPUT"
-        echo "ZIP_SHA256=$ZIP_SHA256" >> "$GITHUB_OUTPUT"
+        echo "zip_size=$ZIP_SIZE" >> "$GITHUB_OUTPUT"
+        echo "zip_sha256=$ZIP_SHA256" >> "$GITHUB_OUTPUT"
+        
+        # Also save to environment
+        echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+        echo "ZIP_SIZE=$ZIP_SIZE" >> "$GITHUB_ENV"
+        echo "ZIP_SHA256=$ZIP_SHA256" >> "$GITHUB_ENV"
         
         echo "✅ Kernel ZIP created successfully"
         echo "   Name: $ZIP_NAME"
         echo "   Size: $(numfmt --to=iec-i --suffix=B "$ZIP_SIZE")"
         echo "   SHA256: $ZIP_SHA256"
         echo "::endgroup::"
+
 
     - name: Upload Kernel Artifacts
       uses: actions/upload-artifact@v4
