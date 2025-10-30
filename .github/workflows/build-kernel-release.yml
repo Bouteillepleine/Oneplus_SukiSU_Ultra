@@ -208,36 +208,134 @@ jobs:
         run: |
           set -euo pipefail
           
-          # Create deterministic hash from matrix config
-          CONFIG_HASH=$(echo "${{ toJSON(matrix) }}" | sha256sum | cut -d' ' -f1 | cut -c1-8)
+          echo "::group::Generate Cache Keys"
           
-          # Ccache key - unique per device configuration
-          CCACHE_KEY="ccache-${{ matrix.model }}-${{ matrix.kernel_version }}-${{ matrix.android_version }}-${CONFIG_HASH}"
+          # Validate matrix context availability
+          MATRIX_JSON='${{ toJSON(matrix) }}'
+          if [ "$MATRIX_JSON" = "null" ] || [ -z "$MATRIX_JSON" ]; then
+            echo "::warning::No matrix context available, using fallback"
+            CONFIG_HASH="nomat"
+          else
+            CONFIG_HASH=$(printf '%s' "$MATRIX_JSON" | sha256sum | cut -c1-8)
+          fi
           
-          # Prebuilts key - shared across similar configs
+          # Include build inputs in hash
+          INPUT_HASH=$(printf '%s-%s-%s-%s' \
+            "${{ inputs.hook }}" \
+            "${{ inputs.lsm }}" \
+            "${{ inputs.enable_zram }}" \
+            "${{ inputs.optimize_level }}" | sha256sum | cut -c1-8)
+          
+          # Guard for clang version (may not be set yet in composite action)
+          if [ -n "${{ env.CLANG_VERSION }}" ]; then
+            CLANG_SHORT=$(echo "${{ env.CLANG_VERSION }}" | sha256sum | cut -c1-8)
+          else
+            CLANG_SHORT="noclang"
+            echo "::notice::CLANG_VERSION not set yet, using placeholder"
+          fi
+          
+          # Construct cache keys
+          CCACHE_KEY="ccache-${{ matrix.model }}-${{ matrix.kernel_version }}-${{ matrix.android_version }}-${CONFIG_HASH}-${INPUT_HASH}-${CLANG_SHORT}"
+          
+          # Prebuilts key (independent of clang/inputs)
           PREBUILTS_HASH="${{ hashFiles(format('configs/{0}.json', matrix.model)) }}"
           PREBUILTS_KEY="prebuilts-${{ matrix.model }}-${{ matrix.kernel_version }}-${PREBUILTS_HASH}"
           
           echo "ccache_key=$CCACHE_KEY" >> $GITHUB_OUTPUT
           echo "prebuilts_key=$PREBUILTS_KEY" >> $GITHUB_OUTPUT
           
-          echo "::group::Generated Cache Keys"
-          echo "Config Hash: $CONFIG_HASH"
-          echo "Ccache Key: $CCACHE_KEY"
-          echo "Prebuilts Key: $PREBUILTS_KEY"
+          # Export ccache environment (consistent path)
+          CCACHE_DIR="$HOME/.ccache"
+          echo "CCACHE_DIR=$CCACHE_DIR" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=5G" >> $GITHUB_ENV
+          
+          echo "Cache keys generated:"
+          echo "  Config Hash: $CONFIG_HASH"
+          echo "  Input Hash: $INPUT_HASH"
+          echo "  Clang Token: $CLANG_SHORT"
+          echo "  Ccache Key: $CCACHE_KEY"
+          echo "  Prebuilts Key: $PREBUILTS_KEY"
+          echo "  Directory: $CCACHE_DIR"
+          
           echo "::endgroup::"
 
       - name: Restore Compiler Cache
         id: cache-ccache-restore
         uses: actions/cache/restore@v4
         with:
-          path: ~/.ccache
+          path: ${{ env.CCACHE_DIR }}
           key: ${{ steps.cache-keys.outputs.ccache_key }}
           restore-keys: |
             ccache-${{ matrix.model }}-${{ matrix.kernel_version }}-${{ matrix.android_version }}-
             ccache-${{ matrix.model }}-${{ matrix.kernel_version }}-
             ccache-${{ matrix.model }}-
           enableCrossOsArchive: false
+
+      - name: Configure Ccache
+        shell: bash
+        run: |
+          set -euo pipefail
+          
+          echo "::group::Configure Ccache"
+          
+          CCACHE_DIR="${{ env.CCACHE_DIR }}"
+          mkdir -p "$CCACHE_DIR"
+          
+          if ! command -v ccache >/dev/null 2>&1; then
+            echo "::warning::ccache not found, compilation will be slower"
+            echo "::endgroup::"
+            exit 0
+          fi
+          
+          # Set maximum size
+          ccache -M "${{ env.CCACHE_MAXSIZE }}"
+          
+          # ============================================
+          # CENTRALIZED CONFIGURATION (single source of truth)
+          # ============================================
+          
+          # Compiler check: 'content' is safer than 'none'
+          ccache -o compiler_check=content
+          
+          # Consolidate sloppiness settings (single point of control)
+          ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime
+          
+          # Performance optimizations
+          ccache -o max_files=0          # No file count limit, only size
+          ccache -o hash_dir=false        # Don't hash current directory
+          ccache -o compression=true      # Enable compression
+          ccache -o compression_level=1   # Fast compression
+          
+          # Show final configuration
+          echo "Ccache configuration:"
+          ccache -p | grep -E '(max_size|compiler_check|sloppiness|hash_dir|compression)' || ccache -p
+          
+          # Show initial state (DON'T reset stats with -z for cumulative tracking)
+          echo ""
+          echo "Initial ccache state:"
+          ccache -s
+          
+          # Show cache directory info
+          echo ""
+          echo "Cache directory: $CCACHE_DIR"
+          echo "Owner: $(stat -c '%U:%G' "$CCACHE_DIR" 2>/dev/null || echo 'N/A')"
+          
+          CACHE_SIZE=$(du -sh "$CCACHE_DIR" 2>/dev/null | awk '{print $1}' || echo "0")
+          echo "Size: $CACHE_SIZE"
+          
+          # Determine restore status
+          if [ "${{ steps.cache-ccache-restore.outputs.cache-hit }}" = "true" ]; then
+            echo ""
+            echo "✅ Exact cache hit"
+          elif [ -n "${{ steps.cache-ccache-restore.outputs.cache-matched-key }}" ]; then
+            echo ""
+            echo "🔄 Partial cache hit: ${{ steps.cache-ccache-restore.outputs.cache-matched-key }}"
+          else
+            echo ""
+            echo "❌ Cold cache start"
+          fi
+          
+          echo "::endgroup::"
 
       - name: Restore Prebuilts Cache
         id: cache-prebuilts-restore
@@ -262,8 +360,8 @@ jobs:
           echo "Prebuilts Matched Key: ${{ steps.cache-prebuilts-restore.outputs.cache-matched-key || 'none' }}"
           echo ""
           
-          if [ -d ~/.ccache ]; then
-            echo "Ccache size: $(du -sh ~/.ccache 2>/dev/null | awk '{print $1}' || echo '0')"
+          if [ -d "${{ env.CCACHE_DIR }}" ]; then
+            echo "Ccache size: $(du -sh ${{ env.CCACHE_DIR }} 2>/dev/null | awk '{print $1}' || echo '0')"
           else
             echo "Ccache: not restored (cold start)"
           fi
@@ -315,6 +413,189 @@ jobs:
           done
           [ $missing -gt 0 ] && exit 1 || exit 0
 
+      - name: Ccache Statistics
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          
+          if ! command -v ccache >/dev/null 2>&1; then
+            echo "ccache not available"
+            exit 0
+          fi
+          
+          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+          
+          echo "::group::Final Ccache Statistics"
+          ccache -s
+          echo "::endgroup::"
+          
+          # ============================================
+          # HARDENED STATISTICS PARSING
+          # ============================================
+          
+          STATS_OUTPUT=$(ccache -s 2>/dev/null || echo "")
+          
+          # Extract hit rate with robust parsing
+          CACHE_HIT_RATE=$(echo "$STATS_OUTPUT" | awk -F': ' '
+            /cache hit rate/ {
+              # Remove percentage sign and whitespace
+              gsub(/%/, "", $2)
+              gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+              print $2
+            }
+          ')
+          [ -z "$CACHE_HIT_RATE" ] && CACHE_HIT_RATE="N/A"
+          
+          # Extract numeric values with fallback to 0
+          DIRECT_HITS=$(echo "$STATS_OUTPUT" | awk -F': ' '
+            /cache hit \(direct\)/ {
+              gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+              print $2
+            }
+          ' | awk '{print $1}')
+          [ -z "$DIRECT_HITS" ] || ! [[ "$DIRECT_HITS" =~ ^[0-9]+$ ]] && DIRECT_HITS=0
+          
+          PREPROCESSED_HITS=$(echo "$STATS_OUTPUT" | awk -F': ' '
+            /cache hit \(preprocessed\)/ {
+              gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+              print $2
+            }
+          ' | awk '{print $1}')
+          [ -z "$PREPROCESSED_HITS" ] || ! [[ "$PREPROCESSED_HITS" =~ ^[0-9]+$ ]] && PREPROCESSED_HITS=0
+          
+          CACHE_MISSES=$(echo "$STATS_OUTPUT" | awk -F': ' '
+            /cache miss/ {
+              gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+              print $2
+            }
+          ' | awk '{print $1}')
+          [ -z "$CACHE_MISSES" ] || ! [[ "$CACHE_MISSES" =~ ^[0-9]+$ ]] && CACHE_MISSES=0
+          
+          # Safe arithmetic (guaranteed numeric)
+          TOTAL_HITS=$((DIRECT_HITS + PREPROCESSED_HITS))
+          TOTAL_CALLS=$((TOTAL_HITS + CACHE_MISSES))
+          
+          # Get cache size
+          CACHE_SIZE=$(du -sh "$CCACHE_DIR" 2>/dev/null | awk '{print $1}' || echo "N/A")
+          CACHE_SIZE_BYTES=$(du -s "$CCACHE_DIR" 2>/dev/null | awk '{print $1}' || echo "0")
+          
+          # Get file count
+          FILE_COUNT=$(find "$CCACHE_DIR" -type f 2>/dev/null | wc -l || echo "0")
+          
+          # Determine cache status
+          if [ "${{ steps.cache-ccache-restore.outputs.cache-hit }}" = "true" ]; then
+            CACHE_STATUS="✅ Exact match"
+          elif [ -n "${{ steps.cache-ccache-restore.outputs.cache-matched-key }}" ]; then
+            CACHE_STATUS="🔄 Partial match"
+          else
+            CACHE_STATUS="❌ Cold start"
+          fi
+          
+          # Export for summary (all values guaranteed safe)
+          echo "CACHE_HIT_RATE=$CACHE_HIT_RATE" >> $GITHUB_ENV
+          echo "CACHE_SIZE=$CACHE_SIZE" >> $GITHUB_ENV
+          echo "CACHE_SIZE_BYTES=$CACHE_SIZE_BYTES" >> $GITHUB_ENV
+          echo "CACHE_STATUS=$CACHE_STATUS" >> $GITHUB_ENV
+          echo "TOTAL_HITS=$TOTAL_HITS" >> $GITHUB_ENV
+          echo "CACHE_MISSES=$CACHE_MISSES" >> $GITHUB_ENV
+          echo "TOTAL_CALLS=$TOTAL_CALLS" >> $GITHUB_ENV
+          echo "FILE_COUNT=$FILE_COUNT" >> $GITHUB_ENV
+          
+          echo ""
+          echo "📊 Cache Performance:"
+          echo "   Status: $CACHE_STATUS"
+          echo "   Hit Rate: $CACHE_HIT_RATE%"
+          echo "   Hits: $TOTAL_HITS"
+          echo "   Misses: $CACHE_MISSES"
+          echo "   Total Calls: $TOTAL_CALLS"
+          echo "   Cache Size: $CACHE_SIZE"
+          echo "   File Count: $FILE_COUNT"
+
+      - name: Check Ccache Before Save
+        id: ccache-present
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          
+          CCACHE_DIR="${{ env.CCACHE_DIR }}"
+          
+          # Validate directory exists
+          if [ ! -d "$CCACHE_DIR" ]; then
+            echo "present=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Cache directory doesn't exist"
+            exit 0
+          fi
+          
+          SIZE=$(du -s "$CCACHE_DIR" 2>/dev/null | awk '{print $1}' || echo "0")
+          FILE_COUNT=$(find "$CCACHE_DIR" -type f 2>/dev/null | wc -l || echo "0")
+          
+          echo "Cache size: ${SIZE} KB"
+          echo "File count: ${FILE_COUNT}"
+          
+          # Thresholds: at least 1MB (1024 KB) and 10 files
+          MIN_SIZE=1024
+          MIN_FILES=10
+          
+          if [ "$SIZE" -gt "$MIN_SIZE" ] && [ "$FILE_COUNT" -gt "$MIN_FILES" ]; then
+            echo "present=true" >> $GITHUB_OUTPUT
+            echo "✅ Cache has content, will save"
+            echo "   Size: $(numfmt --to=iec-i --suffix=B $((SIZE * 1024)) 2>/dev/null || echo "${SIZE} KB")"
+            echo "   Files: $FILE_COUNT"
+          else
+            echo "present=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Cache is empty or too small"
+            echo "   Size: ${SIZE} KB (minimum: ${MIN_SIZE} KB)"
+            echo "   Files: ${FILE_COUNT} (minimum: ${MIN_FILES})"
+            echo "   Skipping save to avoid overwriting good cache"
+          fi
+
+      - name: Check Prebuilts Before Save
+        id: prebuilts-present
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          
+          PREBUILTS_DIR="${{ matrix.model }}/kernel_platform/prebuilts-master"
+          
+          if [ ! -d "$PREBUILTS_DIR" ]; then
+            echo "present=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Prebuilts directory doesn't exist"
+            exit 0
+          fi
+          
+          # Check if directory has any files
+          FILE_COUNT=$(find "$PREBUILTS_DIR" -type f 2>/dev/null | head -1 | wc -l || echo "0")
+          
+          if [ "$FILE_COUNT" -gt 0 ]; then
+            echo "present=true" >> $GITHUB_OUTPUT
+            echo "✅ Prebuilts directory has content"
+            
+            SIZE=$(du -sh "$PREBUILTS_DIR" 2>/dev/null | awk '{print $1}' || echo "N/A")
+            echo "   Size: $SIZE"
+          else
+            echo "present=false" >> $GITHUB_OUTPUT
+            echo "⚠️ Prebuilts directory is empty"
+          fi
+
+      - name: Save Compiler Cache
+        if: always() && steps.ccache-present.outputs.present == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.cache-keys.outputs.ccache_key }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save Prebuilts Cache
+        if: always() && steps.prebuilts-present.outputs.present == 'true' && steps.cache-prebuilts-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ matrix.model }}/kernel_platform/prebuilts
+            ${{ matrix.model }}/kernel_platform/prebuilts-master
+          key: ${{ steps.cache-keys.outputs.prebuilts_key }}
+
       - name: Build Summary
         if: always()
         shell: bash
@@ -335,110 +616,25 @@ jobs:
           | Size | $(numfmt --to=iec-i --suffix=B ${{ steps.build.outputs.zip_size }} 2>/dev/null || echo "${{ steps.build.outputs.zip_size }}") |
           
           **Config:** Hook=\`${{ inputs.hook }}\` LSM=\`${{ inputs.lsm }}\` ZRAM=\`${{ inputs.enable_zram }}\` Opt=\`${{ inputs.optimize_level }}\`
-          EOF
-
-      - name: Prepare Cache Directories
-        if: always()
-        shell: bash
-        run: |
-          echo "::group::Prepare Cache Directories"
-          
-          mkdir -p ~/.ccache
-          
-          if [ -d "${{ matrix.model }}" ]; then
-            mkdir -p "${{ matrix.model }}/kernel_platform/prebuilts"
-            mkdir -p "${{ matrix.model }}/kernel_platform/prebuilts-master"
-          fi
-          
-          echo "Cache directory sizes before save:"
-          du -sh ~/.ccache 2>/dev/null || echo "  ~/.ccache: empty"
-          du -sh "${{ matrix.model }}/kernel_platform/prebuilts" 2>/dev/null || echo "  prebuilts: empty"
-          du -sh "${{ matrix.model }}/kernel_platform/prebuilts-master" 2>/dev/null || echo "  prebuilts-master: empty"
-          
-          echo "::endgroup::"
-
-      - name: Save Compiler Cache
-        id: cache-ccache-save
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.ccache
-          key: ${{ steps.cache-keys.outputs.ccache_key }}-${{ github.run_id }}-${{ github.run_attempt }}
-
-      - name: Save Prebuilts Cache
-        id: cache-prebuilts-save
-        if: always() && steps.cache-prebuilts-restore.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ${{ matrix.model }}/kernel_platform/prebuilts
-            ${{ matrix.model }}/kernel_platform/prebuilts-master
-          key: ${{ steps.cache-keys.outputs.prebuilts_key }}-${{ github.run_id }}-${{ github.run_attempt }}
-
-      - name: Cache Statistics
-        if: always()
-        shell: bash
-        run: |
-          export CCACHE_DIR="$HOME/.ccache"
-          
-          echo "::group::Cache Save Status"
-          echo "Ccache Save: ${{ steps.cache-ccache-save.outcome }}"
-          echo "Prebuilts Save: ${{ steps.cache-prebuilts-save.outcome }}"
-          echo "::endgroup::"
-          
-          if command -v ccache >/dev/null 2>&1 && [ -d "$CCACHE_DIR" ]; then
-            echo "::group::ccache Final Statistics"
-            ccache -s || true
-            echo "::endgroup::"
-            
-            HIT_RATE=$(ccache -s 2>/dev/null | grep "cache hit rate" | awk '{print $NF}' || echo "N/A")
-            CACHE_SIZE=$(du -sh "$CCACHE_DIR" 2>/dev/null | awk '{print $1}' || echo "N/A")
-            
-            if [ "${{ steps.cache-ccache-restore.outputs.cache-hit }}" = "true" ]; then
-              CACHE_STATUS="✅ Exact match"
-            elif [ -n "${{ steps.cache-ccache-restore.outputs.cache-matched-key }}" ]; then
-              CACHE_STATUS="🔄 Partial match"
-            else
-              CACHE_STATUS="❌ Cold start"
-            fi
-            
-            RESTORED_KEY="${{ steps.cache-ccache-restore.outputs.cache-matched-key }}"
-            [ -z "$RESTORED_KEY" ] && RESTORED_KEY="none"
-            
-            if [ "${{ steps.cache-ccache-save.outcome }}" = "success" ]; then
-              CCACHE_SAVE_STATUS="✅ Saved"
-            else
-              CCACHE_SAVE_STATUS="⚠️ Failed"
-            fi
-            
-            if [ "${{ steps.cache-prebuilts-save.outcome }}" = "success" ]; then
-              PREBUILTS_SAVE_STATUS="✅ Saved"
-            elif [ "${{ steps.cache-prebuilts-save.outcome }}" = "skipped" ]; then
-              PREBUILTS_SAVE_STATUS="⏭️ Skipped (exact hit)"
-            else
-              PREBUILTS_SAVE_STATUS="⚠️ Failed"
-            fi
-            
-            cat >> $GITHUB_STEP_SUMMARY << EOF
           
           ### 📊 Cache Performance
           
           #### Restore
-          - **Status:** $CACHE_STATUS
-          - **Restored Key:** \`$RESTORED_KEY\`
+          - **Status:** ${{ env.CACHE_STATUS }}
+          - **Restored Key:** \`${{ steps.cache-ccache-restore.outputs.cache-matched-key || 'none' }}\`
           
-          #### Build
-          - **Hit Rate:** $HIT_RATE
-          - **Cache Size:** $CACHE_SIZE
+          #### Build Statistics
+          - **Hit Rate:** ${{ env.CACHE_HIT_RATE }}%
+          - **Cache Hits:** ${{ env.TOTAL_HITS }}
+          - **Cache Misses:** ${{ env.CACHE_MISSES }}
+          - **Total Calls:** ${{ env.TOTAL_CALLS }}
+          - **Cache Size:** ${{ env.CACHE_SIZE }}
+          - **File Count:** ${{ env.FILE_COUNT }}
           
           #### Save
-          - **Ccache:** $CCACHE_SAVE_STATUS
-          - **Prebuilts:** $PREBUILTS_SAVE_STATUS
+          - **Ccache:** $([ "${{ steps.ccache-present.outputs.present }}" = "true" ] && echo "✅ Saved" || echo "⏭️ Skipped (empty/small)")
+          - **Prebuilts:** $([ "${{ steps.cache-prebuilts-restore.outputs.cache-hit }}" = "true" ] && echo "⏭️ Skipped (exact hit)" || ([ "${{ steps.prebuilts-present.outputs.present }}" = "true" ] && echo "✅ Saved" || echo "⏭️ Skipped (empty)"))
           EOF
-          else
-            echo "ccache not available or cache directory not found"
-          fi
 
       - name: Upload Artifacts
         if: success()
