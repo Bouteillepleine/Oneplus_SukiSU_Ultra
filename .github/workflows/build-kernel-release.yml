@@ -289,9 +289,6 @@ jobs:
           compression-level: 0
           if-no-files-found: error
 
-      # ============================================
-      # FIX: Prepare cache directories before cleanup
-      # ============================================
       - name: Prepare Cache Directories
         if: always()
         shell: bash
@@ -337,6 +334,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: ${{ inputs.make_release }}
+    permissions:
+      contents: write
+      actions: write
+      deployments: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RELEASE_NAME: 'OnePlus Kernels - SukiSU Ultra & SUSFS v1.5.2+'
@@ -353,6 +354,7 @@ jobs:
           
           BASE_VERSION="v1.5.2"
           
+          echo "::group::Fetching existing releases"
           # Get all tags matching our pattern and sort numerically
           LATEST=$(gh release list \
             --repo "${{ github.repository }}" \
@@ -360,6 +362,7 @@ jobs:
             --json tagName \
             --jq '[.[] | select(.tagName | startswith("'"$BASE_VERSION"'-r")) | .tagName] | sort_by(split("-r")[1] | tonumber) | .[-1]' \
             2>/dev/null || echo "")
+          echo "::endgroup::"
           
           if [ -z "$LATEST" ]; then
             NEW_TAG="${BASE_VERSION}-r0"
@@ -376,13 +379,16 @@ jobs:
           fi
           
           echo "NEW_TAG=$NEW_TAG" >> $GITHUB_ENV
-          echo "📌 New tag: $NEW_TAG"
+          echo "📌 Tag to be created: $NEW_TAG"
           
-          # Create and push tag
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$NEW_TAG" -m "Release $NEW_TAG - SukiSU Ultra & SUSFS v1.5.2+"
-          git push origin "$NEW_TAG"
+          # Auto-detect prerelease based on tag name
+          if [[ "$NEW_TAG" =~ (alpha|beta|rc|test|dev|pre) ]]; then
+            echo "IS_PRERELEASE=true" >> $GITHUB_ENV
+            echo "🔬 Detected as prerelease"
+          else
+            echo "IS_PRERELEASE=false" >> $GITHUB_ENV
+            echo "🎯 Detected as stable release"
+          fi
 
       - name: Download Artifacts
         uses: actions/download-artifact@v4
@@ -394,28 +400,42 @@ jobs:
         run: |
           set -euo pipefail
           
+          echo "::group::Organizing artifacts"
           mkdir -p ./release-assets
           
-          echo "Organizing artifacts..."
-          find ./all-artifacts -name "*.zip" -type f | while read -r zip; do
+          # Copy kernel ZIPs
+          zip_count=0
+          while IFS= read -r -d '' zip; do
             filename=$(basename "$zip")
-            echo "  Found: $filename"
+            echo "  Found ZIP: $filename"
             cp "$zip" "./release-assets/$filename"
-          done
+            ((zip_count++))
+          done < <(find ./all-artifacts -name "*.zip" -type f -print0 | sort -z)
           
-          find ./all-artifacts -name "build_info.txt" -type f | while read -r info; do
-            model=$(echo "$info" | sed -n 's|.*/kernel-\([^/]*\)-android.*/.*|\1|p')
-            [ -n "$model" ] && cp "$info" "./release-assets/build_info_${model}.txt"
-          done
+          # Copy build info files with model-specific naming
+          info_count=0
+          while IFS= read -r -d '' info; do
+            # Extract model from artifact path: kernel-{model}-android{version}-{kernel}/build_info.txt
+            model=$(echo "$info" | sed -n 's|.*/kernel-\([^/]*\)-android[^/]*/.*|\1|p')
+            if [ -n "$model" ]; then
+              echo "  Found build info: $model"
+              cp "$info" "./release-assets/build_info_${model}.txt"
+              ((info_count++))
+            fi
+          done < <(find ./all-artifacts -name "build_info.txt" -type f -print0 | sort -z)
+          
+          echo "::endgroup::"
           
           echo ""
-          echo "Release assets:"
+          echo "Release assets summary:"
           ls -lh ./release-assets/
           
-          zip_count=$(find ./release-assets -name "*.zip" -type f | wc -l)
-          [ "$zip_count" -eq 0 ] && { echo "::error::No ZIPs found!"; exit 1; }
+          if [ "$zip_count" -eq 0 ]; then
+            echo "::error::No kernel ZIPs found!"
+            exit 1
+          fi
           
-          echo "✅ Found $zip_count kernel ZIP(s)"
+          echo "✅ Organized $zip_count kernel ZIP(s) and $info_count build info file(s)"
 
       - name: Generate Release Notes
         shell: bash
@@ -436,7 +456,8 @@ jobs:
           EOF
           
           # Process each build_info.txt
-          find ./release-assets -name "build_info_*.txt" -type f 2>/dev/null | sort | while read -r info; do
+          device_count=0
+          while IFS= read -r -d '' info; do
             model=$(basename "$info" | sed 's/build_info_\(.*\)\.txt/\1/')
             
             kernel_ver=$(grep "^Kernel Version:" "$info" 2>/dev/null | cut -d: -f2- | xargs || echo "?")
@@ -444,6 +465,7 @@ jobs:
             sukisu_ver=$(grep "^SukiSU Version:" "$info" 2>/dev/null | cut -d: -f2- | xargs || echo "?")
             susfs_ver=$(grep "^SUSFS Version:" "$info" 2>/dev/null | cut -d: -f2- | xargs || echo "?")
             
+            # Find corresponding ZIP and verify SUSFS module
             zip_file=$(find ./release-assets -name "*${model}*.zip" -type f 2>/dev/null | head -1)
             
             if [ -n "$zip_file" ] && [ -f "$zip_file" ] && unzip -l "$zip_file" 2>/dev/null | grep -q "ksu_module_susfs"; then
@@ -454,9 +476,11 @@ jobs:
             
             printf "| %-12s | %-18s | %-8s | %-8s | %-8s | %s |\n" \
               "$model" "$kernel_ver" "$android_ver" "$sukisu_ver" "$susfs_ver" "$status" >> notes.md
-          done || true
+            
+            ((device_count++))
+          done < <(find ./release-assets -name "build_info_*.txt" -type f -print0 | sort -z)
           
-          if ! grep -q "^| " notes.md; then
+          if [ "$device_count" -eq 0 ]; then
             echo "| *No builds completed* | - | - | - | - | ❌ |" >> notes.md
           fi
           
@@ -489,16 +513,16 @@ jobs:
           5. **Install** SukiSU Manager APK
           
           ## ⚙️ Build Configuration
-          - **Hook:** ${{ inputs.hook }}
-          - **LSM:** ${{ inputs.lsm }}
-          - **ZRAM:** ${{ inputs.enable_zram }}
-          - **Optimization:** ${{ inputs.optimize_level }}
+          - **Hook:** `${{ inputs.hook }}`
+          - **LSM:** `${{ inputs.lsm }}`
+          - **ZRAM:** `${{ inputs.enable_zram }}`
+          - **Optimization:** `${{ inputs.optimize_level }}`
           
           ## 🔍 Verification
           After flashing, verify SUSFS is active:
-          \`\`\`bash
+          ```bash
           su -c "dmesg | grep -i susfs"
-          \`\`\`
+          ```
           
           You should see SUSFS initialization messages.
           
@@ -509,73 +533,120 @@ jobs:
           ---
           **Build Date:** $(date -u '+%Y-%m-%d %H:%M UTC')  
           **Build Run:** #${{ github.run_number }}  
+          **Commit:** ${{ github.sha }}  
           **Workflow:** ${{ github.workflow }}
           EOF
           
+          echo "Generated release notes for $device_count device(s)"
+          
+          echo "::group::Release Notes Preview"
           cat notes.md
+          echo "::endgroup::"
 
-      - name: Create Release
-        shell: bash
-        run: |
-          IS_PRERELEASE="false"
-          if [[ "${{ env.NEW_TAG }}" =~ (alpha|beta|rc|test) ]]; then
-            IS_PRERELEASE="true"
-          fi
-          
-          PRERELEASE_FLAG=""
-          if [ "$IS_PRERELEASE" = "true" ]; then
-            PRERELEASE_FLAG="--prerelease"
-          else
-            PRERELEASE_FLAG="--latest"
-          fi
-          
-          for i in {1..3}; do
-            if gh release create "${{ env.NEW_TAG }}" \
-              --repo "${{ github.repository }}" \
-              --title "${{ env.RELEASE_NAME }}" \
-              --notes-file notes.md \
-              $PRERELEASE_FLAG; then
-              exit 0
-            fi
-            echo "Retry $i/3..."
-            sleep 5
-          done
-          exit 1
-
-      - name: Upload Assets
+      - name: Create Release with Assets
         shell: bash
         run: |
           set -euo pipefail
           
-          expected=$(find ./release-assets -name "*.zip" -type f | wc -l)
+          echo "::group::Preparing release"
           
-          find ./release-assets -name "*.zip" -type f | sort | while read -r zip; do
-            filename=$(basename "$zip")
+          # Determine prerelease flag
+          if [ "${{ env.IS_PRERELEASE }}" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+            echo "Creating as prerelease"
+          else
+            PRERELEASE_FLAG="--latest"
+            echo "Creating as latest stable release"
+          fi
+          
+          # Collect all assets (ZIPs and build info files)
+          ASSETS=()
+          while IFS= read -r -d '' file; do
+            ASSETS+=("$file")
+          done < <(find ./release-assets -type f \( -name "*.zip" -o -name "build_info_*.txt" \) -print0 | sort -z)
+          
+          if [ ${#ASSETS[@]} -eq 0 ]; then
+            echo "::error::No assets found to upload!"
+            exit 1
+          fi
+          
+          echo "Found ${#ASSETS[@]} asset(s) to upload:"
+          printf '  - %s\n' "${ASSETS[@]}"
+          
+          echo "::endgroup::"
+          
+          # Create release with all assets in one atomic operation
+          # gh release create automatically creates the tag at --target commit
+          for attempt in {1..3}; do
+            echo "::group::Attempt $attempt/3: Creating release ${{ env.NEW_TAG }}"
             
-            for i in {1..3}; do
-              if gh release upload "${{ env.NEW_TAG }}" "$zip" \
-                 --repo "${{ github.repository }}" --clobber; then
-                echo "✅ $filename"
-                break
-              fi
-              echo "⚠️ Retry $i/3: $filename"
-              sleep 5
-            done
+            if gh release create "${{ env.NEW_TAG }}" \
+              --repo "${{ github.repository }}" \
+              --title "${{ env.RELEASE_NAME }}" \
+              --notes-file notes.md \
+              --target "${{ github.sha }}" \
+              $PRERELEASE_FLAG \
+              "${ASSETS[@]}"; then
+              
+              echo "::endgroup::"
+              echo "✅ Release created successfully!"
+              exit 0
+            fi
+            
+            echo "::endgroup::"
+            echo "⚠️ Attempt $attempt failed"
+            
+            if [ $attempt -lt 3 ]; then
+              sleep_time=$((attempt * 5))
+              echo "Retrying in ${sleep_time}s..."
+              sleep $sleep_time
+            fi
           done
           
-          # Upload build info files
-          find ./release-assets -name "build_info_*.txt" -type f | while read -r info; do
-            gh release upload "${{ env.NEW_TAG }}" "$info" \
-              --repo "${{ github.repository }}" --clobber || true
-          done
+          echo "::error::Failed to create release after 3 attempts"
+          exit 1
+
+      - name: Verify Release
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
           
-          actual=$(gh release view "${{ env.NEW_TAG }}" \
+          echo "::group::Verifying release ${{ env.NEW_TAG }}"
+          
+          # Wait for GitHub API to process
+          sleep 3
+          
+          # Get release info
+          RELEASE_INFO=$(gh release view "${{ env.NEW_TAG }}" \
             --repo "${{ github.repository }}" \
-            --json assets --jq '.assets | length')
+            --json tagName,name,url,assets,isDraft,isPrerelease,createdAt)
           
-          echo "Expected ZIPs: $expected | Total assets: $actual"
-          [ "$actual" -eq 0 ] && { echo "::error::No assets!"; exit 1; }
-          echo "✅ Release has $actual asset(s)"
+          ASSET_COUNT=$(echo "$RELEASE_INFO" | jq '.assets | length')
+          IS_DRAFT=$(echo "$RELEASE_INFO" | jq -r '.isDraft')
+          IS_PRERELEASE=$(echo "$RELEASE_INFO" | jq -r '.isPrerelease')
+          RELEASE_URL=$(echo "$RELEASE_INFO" | jq -r '.url')
+          CREATED_AT=$(echo "$RELEASE_INFO" | jq -r '.createdAt')
+          
+          echo "Release Details:"
+          echo "  Tag: ${{ env.NEW_TAG }}"
+          echo "  URL: $RELEASE_URL"
+          echo "  Assets: $ASSET_COUNT"
+          echo "  Draft: $IS_DRAFT"
+          echo "  Prerelease: $IS_PRERELEASE"
+          echo "  Created: $CREATED_AT"
+          
+          if [ "$ASSET_COUNT" -eq 0 ]; then
+            echo "::error::No assets found in release!"
+            exit 1
+          fi
+          
+          echo ""
+          echo "Uploaded Assets:"
+          echo "$RELEASE_INFO" | jq -r '.assets[] | "  - \(.name) (\(.size | tonumber | (. / 1048576 | floor))MB)"'
+          
+          echo "::endgroup::"
+          echo "✅ Release verified successfully!"
 
       - name: Release Summary
         if: always()
@@ -588,23 +659,45 @@ jobs:
           # $emoji Release: ${{ env.NEW_TAG }}
           
           **Status:** $status  
+          **Type:** $([ "${{ env.IS_PRERELEASE }}" = "true" ] && echo "Prerelease 🔬" || echo "Stable 🎯")  
           **URL:** https://github.com/${{ github.repository }}/releases/tag/${{ env.NEW_TAG }}
           
           ## 📦 Assets
           EOF
           
-          find ./release-assets -name "*.zip" -type f 2>/dev/null | while read -r f; do
-            filename=$(basename "$f")
-            size=$(stat -c%s "$f" | numfmt --to=iec-i --suffix=B)
-            
-            if unzip -l "$f" 2>/dev/null | grep -q "ksu_module_susfs"; then
-              status_icon="✅"
-            else
-              status_icon="⚠️"
-            fi
-            
-            echo "- $status_icon \`$filename\` ($size)" >> $GITHUB_STEP_SUMMARY
-          done || echo "- No assets found" >> $GITHUB_STEP_SUMMARY
+          if [ "$status" = "success" ]; then
+            # Fetch actual uploaded assets from release
+            gh release view "${{ env.NEW_TAG }}" \
+              --repo "${{ github.repository }}" \
+              --json assets \
+              --jq '.assets[] | "- `\(.name)` (\((.size | tonumber) / 1048576 | floor)MB)"' \
+              >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "- Could not fetch asset list" >> $GITHUB_STEP_SUMMARY
+          else
+            # Show what we tried to upload
+            find ./release-assets -name "*.zip" -type f 2>/dev/null | sort | while read -r f; do
+              filename=$(basename "$f")
+              size_bytes=$(stat -c%s "$f" 2>/dev/null || echo "0")
+              size_mb=$((size_bytes / 1048576))
+              
+              if unzip -l "$f" 2>/dev/null | grep -q "ksu_module_susfs"; then
+                status_icon="✅"
+              else
+                status_icon="⚠️"
+              fi
+              
+              echo "- $status_icon \`$filename\` (${size_mb}MB)" >> $GITHUB_STEP_SUMMARY
+            done || echo "- No assets found" >> $GITHUB_STEP_SUMMARY
+          fi
           
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Legend:** ✅ = SUSFS module included | ⚠️ = SUSFS module missing" >> $GITHUB_STEP_SUMMARY
+          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
+          
+          ## 🔧 Configuration
+          | Setting | Value |
+          |---------|-------|
+          | Hook | `${{ inputs.hook }}` |
+          | LSM | `${{ inputs.lsm }}` |
+          | ZRAM | `${{ inputs.enable_zram }}` |
+          | Optimization | `${{ inputs.optimize_level }}` |
+          
+          **Legend:** ✅ = SUSFS module included | ⚠️ = SUSFS module missing
+          EOF
