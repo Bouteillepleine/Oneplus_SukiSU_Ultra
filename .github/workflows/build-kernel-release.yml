@@ -98,15 +98,17 @@ jobs:
           
           [ ! -d "configs" ] && { echo "::error::configs/ not found!"; exit 1; }
           
+          # Stable sorted list of configs
           declare -a models=()
           while IFS= read -r -d '' file; do
             models+=("$(basename "$file" .json)")
-          done < <(find configs/ -name "*.json" -print0)
+          done < <(find configs/ -name "*.json" -print0 | sort -z)
           
           [ ${#models[@]} -eq 0 ] && { echo "::error::No configs found!"; exit 1; }
           
           echo "Found ${#models[@]} config(s)"
           
+          # Build JSON array
           echo "[" > matrix.json
           first=true
           for model in "${models[@]}"; do
@@ -118,35 +120,76 @@ jobs:
           done
           echo "]" >> matrix.json
           
+          # Apply filter based on input
           input="${{ github.event.inputs.op_model }}"
           jq_filter="."
           
           if [[ "$input" == "ALL" ]]; then
-            echo "Building all"
+            echo "Building all models"
           elif [[ "$input" == android*-* ]]; then
-            IFS='-' read -r av kv <<< "$input"
+            # Split android version and kernel version
+            # Format: android15-6.6 or android14-5.15
+            av="${input%%-*}"  # Everything before first hyphen
+            kv="${input#*-}"   # Everything after first hyphen
+            
+            if [ -z "$av" ] || [ -z "$kv" ]; then
+              echo "::error::Invalid android-kernel format: $input"
+              exit 1
+            fi
+            
+            echo "Filtering: Android=$av, Kernel=$kv"
             jq_filter="map(select(.android_version == \"$av\" and .kernel_version == \"$kv\"))"
           else
+            echo "Filtering: Model=$input"
             jq_filter="map(select(.model == \"$input\"))"
           fi
           
+          # Apply filter
           filtered=$(jq -c "$jq_filter" matrix.json)
-          [ "$(echo "$filtered" | jq 'length')" -eq 0 ] && { echo "::error::No match: $input"; exit 1; }
+          count=$(echo "$filtered" | jq 'length')
           
+          # Validate results
+          if [ "$count" -eq 0 ]; then
+            echo "::error::No configurations match: $input"
+            exit 1
+          fi
+          
+          # Check matrix size limit (GitHub Actions max: 256)
+          if [ "$count" -gt 256 ]; then
+            echo "::error::Too many configurations ($count > 256). Please use a more specific filter."
+            exit 1
+          fi
+          
+          echo "Matched $count configuration(s)"
+          
+          # Wrap in include object
           wrapped=$(jq -n --argjson items "$filtered" '{ include: $items }')
           
+          # Output to GitHub
           {
             echo "matrix<<EOF"
             echo "$wrapped"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
           
+          # Generate summary
           {
             echo "### 📱 Build Matrix"
-            echo "**Input:** \`$input\` | **Count:** $(echo "$filtered" | jq 'length')"
+            echo "**Input:** \`$input\` | **Matched:** $count configuration(s)"
+            echo ""
+            echo "<details>"
+            echo "<summary>View Matrix JSON</summary>"
+            echo ""
             echo '```json'
             echo "$wrapped" | jq '.'
             echo '```'
+            echo "</details>"
+            echo ""
+            echo "| # | Model | Android | Kernel |"
+            echo "|---|-------|---------|--------|"
+            
+            echo "$filtered" | jq -r '.[] | "\(.model)|\(.android_version)|\(.kernel_version)"' | \
+            awk -F'|' '{printf "| %d | %s | %s | %s |\n", NR, $1, $2, $3}'
           } >> $GITHUB_STEP_SUMMARY
 
   build:
@@ -161,17 +204,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Build Cache
+      - name: Setup Compiler Cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ matrix.model }}-${{ matrix.kernel_version }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ matrix.model }}-${{ matrix.kernel_version }}-
+            ccache-${{ matrix.model }}-
+
+      - name: Setup Prebuilts Cache
         uses: actions/cache@v4
         with:
           path: |
-            ~/.ccache
             ${{ matrix.model }}/kernel_platform/prebuilts
             ${{ matrix.model }}/kernel_platform/prebuilts-master
-          key: build-${{ matrix.model }}-${{ matrix.kernel_version }}-${{ hashFiles('configs/${{ matrix.model }}.json') }}
+          key: prebuilts-${{ matrix.model }}-${{ matrix.kernel_version }}-${{ hashFiles(format('configs/{0}.json', matrix.model)) }}
           restore-keys: |
-            build-${{ matrix.model }}-${{ matrix.kernel_version }}-
-            build-${{ matrix.model }}-
+            prebuilts-${{ matrix.model }}-${{ matrix.kernel_version }}-
+            prebuilts-${{ matrix.model }}-
 
       - name: Build Kernel
         id: build
@@ -253,7 +304,7 @@ jobs:
     if: ${{ inputs.make_release }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      RELEASE_NAME: 'OnePlus Kernels - SukiSU Ultra & SUSFS v1.5.12'
+      RELEASE_NAME: 'OnePlus Kernels - SukiSU Ultra & SUSFS v1.5.2+'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -263,23 +314,40 @@ jobs:
       - name: Generate Tag
         shell: bash
         run: |
-          BASE="v1.5.12-r0"
-          LATEST=$(gh api repos/${{ github.repository }}/tags \
-            --jq '[.[] | select(.name | startswith("v1.5.12-r")) | .name] | .[0]' 2>/dev/null || echo "")
+          set -euo pipefail
+          
+          BASE_VERSION="v1.5.2"
+          
+          # Get all tags matching our pattern and sort numerically
+          LATEST=$(gh release list \
+            --repo "${{ github.repository }}" \
+            --limit 100 \
+            --json tagName \
+            --jq '[.[] | select(.tagName | startswith("'"$BASE_VERSION"'-r")) | .tagName] | sort_by(split("-r")[1] | tonumber) | .[-1]' \
+            2>/dev/null || echo "")
           
           if [ -z "$LATEST" ]; then
-            NEW_TAG="$BASE"
+            NEW_TAG="${BASE_VERSION}-r0"
+            echo "No existing tags found, starting with: $NEW_TAG"
           else
+            # Extract revision number
             REV=$(echo "$LATEST" | sed -n 's/.*-r\([0-9]\+\)$/\1/p')
-            NEW_TAG="v1.5.12-r$((${REV:-0} + 1))"
+            if [ -z "$REV" ]; then
+              echo "::error::Failed to parse revision from: $LATEST"
+              exit 1
+            fi
+            NEW_TAG="${BASE_VERSION}-r$((REV + 1))"
+            echo "Latest tag: $LATEST (rev $REV)"
+            echo "New tag: $NEW_TAG"
           fi
           
           echo "NEW_TAG=$NEW_TAG" >> $GITHUB_ENV
           echo "📌 New tag: $NEW_TAG"
           
+          # Create and push tag
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
+          git tag -a "$NEW_TAG" -m "Release $NEW_TAG - SukiSU Ultra & SUSFS v1.5.2+"
           git push origin "$NEW_TAG"
 
       - name: Download Artifacts
@@ -321,51 +389,95 @@ jobs:
           set -euo pipefail
           
           cat << 'EOF' > notes.md
-          # 🚀 SukiSU Ultra with SUSFS v1.5.12
+          # 🚀 SukiSU Ultra with SUSFS v1.5.2+
           
-          **Module:** https://github.com/sidex15/ksu_module_susfs  
-          **Manager:** https://github.com/SukiSU-Ultra/SukiSU-Ultra  
+          **SUSFS Module:** https://github.com/sidex15/susfs4ksu-module (v1.5.2+ branch)  
+          **SukiSU Manager:** https://github.com/SukiSU-Ultra/SukiSU-Ultra  
+          **SUSFS Kernel:** https://gitlab.com/simonpunk/susfs4ksu  
           
           ## 📱 Built Devices
           
-          | Device | Kernel | SukiSU | SUSFS | Android | Base |
-          |--------|--------|--------|-------|---------|------|
+          | Device | Kernel | Android | SukiSU | SUSFS | Status |
+          |--------|--------|---------|--------|-------|--------|
           EOF
           
-          find ./release-assets -name "build_info_*.txt" -type f | sort | while read -r info; do
+          # Process each build_info.txt (skip if missing)
+          find ./release-assets -name "build_info_*.txt" -type f 2>/dev/null | sort | while read -r info; do
             model=$(basename "$info" | sed 's/build_info_\(.*\)\.txt/\1/')
-            kernel_ver=$(grep "^Kernel Version:" "$info" | cut -d: -f2- | xargs || echo "?")
-            sukisu_ver=$(grep "^SukiSU Version:" "$info" | cut -d: -f2- | xargs || echo "?")
-            susfs_ver=$(grep "^SUSFS Version:" "$info" | cut -d: -f2- | xargs || echo "?")
-            android_ver=$(grep "^Android Version:" "$info" | cut -d: -f2- | xargs || echo "?")
-            kernel_base=$(grep "^Kernel Base:" "$info" | cut -d: -f2- | xargs || echo "?")
             
-            printf "| %-12s | %-18s | %-8s | %-8s | %-8s | %-8s |\n" \
-              "$model" "$kernel_ver" "$sukisu_ver" "$susfs_ver" "$android_ver" "$kernel_base" >> notes.md
-          done
+            # Read from build_info.txt with fallbacks
+            kernel_ver=$(grep "^Kernel Version:" "$info" 2>/dev/null | cut -d: -f2- | xargs || echo "?")
+            android_ver=$(grep "^Android Version:" "$info" 2>/dev/null | cut -d: -f2- | xargs || echo "?")
+            sukisu_ver=$(grep "^SukiSU Version:" "$info" 2>/dev/null | cut -d: -f2- | xargs || echo "?")
+            susfs_ver=$(grep "^SUSFS Version:" "$info" 2>/dev/null | cut -d: -f2- | xargs || echo "?")
+            
+            # Find corresponding ZIP
+            zip_file=$(find ./release-assets -name "*${model}*.zip" -type f 2>/dev/null | head -1)
+            
+            # Check SUSFS module presence
+            if [ -n "$zip_file" ] && [ -f "$zip_file" ] && unzip -l "$zip_file" 2>/dev/null | grep -q "ksu_module_susfs"; then
+              status="✅"
+            else
+              status="⚠️"
+            fi
+            
+            printf "| %-12s | %-18s | %-8s | %-8s | %-8s | %s |\n" \
+              "$model" "$kernel_ver" "$android_ver" "$sukisu_ver" "$susfs_ver" "$status" >> notes.md
+          done || true  # Don't fail if no build_info files found
+          
+          # If no devices were added, add a note
+          if ! grep -q "^| " notes.md; then
+            echo "| *No builds completed* | - | - | - | - | ❌ |" >> notes.md
+          fi
           
           cat << 'EOF' >> notes.md
-          
+
           ## ✨ Features
-          - ⚡ SukiSU Ultra Manager
-          - 🛡️ SUSFS v1.5.12
-          - 🔐 Magic Mount
-          - 🔒 WireGuard
-          - 🚀 BBR v1
-          - 🐛 Ptrace fix (<5.16)
-          - 🎯 Manual/Kprobe/Tracepoint Hooks
-          - 💾 ZRAM algorithms (optional)
-          - ⚙️ BBG LSM (optional)
+          - ⚡ **SukiSU Ultra Manager** (Latest from susfs-main branch)
+          - 🛡️ **SUSFS v1.5.2+** (Kernel patches + KSU module included)
+          - 🔐 Magic Mount support
+          - 🔒 WireGuard VPN support
+          - 🚀 BBR v1 TCP congestion control
+          - 🐛 Ptrace fix for kernels <5.16
+          - 🎯 Flexible hook types (Manual/Kprobe/Tracepoint)
+          - 💾 ZRAM with advanced compressors (LZ4K, LZ4KD, 842)
+          - ⚙️ BBG LSM (Baseband Guard)
+          - 🔧 Optimized builds (O2/O3)
+          
+          ## 📦 What's Included
+          Each kernel ZIP contains:
+          - ✅ Kernel Image with SukiSU Ultra & SUSFS patches
+          - ✅ SUSFS KSU Module (v1.5.2+ from CI)
+          - ✅ AnyKernel3 flasher
+          - ✅ All necessary tools and scripts
           
           ## 📥 Installation
-          1. Download ZIP for your device
-          2. Reboot to recovery
-          3. Flash ZIP
-          4. Reboot
-          5. Install SukiSU Ultra Manager
+          1. **Download** the ZIP for your device      
+          2. **Flash** the kernel ZIP using SukiSU Manager
+          3. **Reboot** to system      
+          
+          ## ⚙️ Build Configuration
+          - **Hook:** ${{ inputs.hook }}
+          - **LSM:** ${{ inputs.lsm }}
+          - **ZRAM:** ${{ inputs.enable_zram }}
+          - **Optimization:** ${{ inputs.optimize_level }}
+          
+          ## 🔍 Verification
+          After flashing, you can verify SUSFS is active:
+          \`\`\`bash
+          su -c "dmesg | grep -i susfs"
+          \`\`\`
+          
+          You should see SUSFS initialization messages.
+          
+          ## ⚠️ Legend
+          - ✅ = SUSFS module confirmed in package
+          - ⚠️ = SUSFS module missing (verify before flashing)
           
           ---
-          **Build:** $(date -u '+%Y-%m-%d %H:%M UTC') | Run #${{ github.run_number }}
+          **Build Date:** $(date -u '+%Y-%m-%d %H:%M UTC')  
+          **Build Run:** #${{ github.run_number }}  
+          **Workflow:** ${{ github.workflow }}
           EOF
           
           cat notes.md
@@ -373,12 +485,27 @@ jobs:
       - name: Create Release
         shell: bash
         run: |
+          # Determine if this should be a prerelease
+          IS_PRERELEASE="false"
+          if [[ "${{ env.NEW_TAG }}" =~ (alpha|beta|rc|test) ]]; then
+            IS_PRERELEASE="true"
+          fi
+          
+          PRERELEASE_FLAG=""
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          else
+            PRERELEASE_FLAG="--latest"
+          fi
+          
           for i in {1..3}; do
-            gh release create "${{ env.NEW_TAG }}" \
+            if gh release create "${{ env.NEW_TAG }}" \
               --repo "${{ github.repository }}" \
               --title "${{ env.RELEASE_NAME }}" \
               --notes-file notes.md \
-              --prerelease && exit 0
+              $PRERELEASE_FLAG; then
+              exit 0
+            fi
             echo "Retry $i/3..."
             sleep 5
           done
@@ -407,11 +534,17 @@ jobs:
             done
           done
           
+          # Also upload build info files
+          find ./release-assets -name "build_info_*.txt" -type f | while read -r info; do
+            gh release upload "${{ env.NEW_TAG }}" "$info" \
+              --repo "${{ github.repository }}" --clobber || true
+          done
+          
           actual=$(gh release view "${{ env.NEW_TAG }}" \
             --repo "${{ github.repository }}" \
             --json assets --jq '.assets | length')
           
-          echo "Expected: $expected | In Release: $actual"
+          echo "Expected ZIPs: $expected | Total assets in release: $actual"
           [ "$actual" -eq 0 ] && { echo "::error::No assets!"; exit 1; }
           echo "✅ Release has $actual asset(s)"
 
@@ -428,9 +561,22 @@ jobs:
           **Status:** $status  
           **URL:** https://github.com/${{ github.repository }}/releases/tag/${{ env.NEW_TAG }}
           
-          ## Assets
+          ## 📦 Assets
           EOF
           
           find ./release-assets -name "*.zip" -type f 2>/dev/null | while read -r f; do
-            echo "- \`$(basename "$f")\` ($(stat -c%s "$f" | numfmt --to=iec-i --suffix=B))" >> $GITHUB_STEP_SUMMARY
+            filename=$(basename "$f")
+            size=$(stat -c%s "$f" | numfmt --to=iec-i --suffix=B)
+            
+            # Check if SUSFS module is present
+            if unzip -l "$f" 2>/dev/null | grep -q "ksu_module_susfs"; then
+              status_icon="✅"
+            else
+              status_icon="⚠️"
+            fi
+            
+            echo "- $status_icon \`$filename\` ($size)" >> $GITHUB_STEP_SUMMARY
           done || echo "- No assets found" >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Legend:** ✅ = SUSFS module included | ⚠️ = SUSFS module missing" >> $GITHUB_STEP_SUMMARY
