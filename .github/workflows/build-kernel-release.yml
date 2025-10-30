@@ -567,12 +567,10 @@ jobs:
           - ✅ All necessary tools and scripts
           
           ## 📥 Installation
-          1. **Download** the ZIP for your device
-          2. **Reboot** to recovery (TWRP/OrangeFox recommended)
-          3. **Flash** the ZIP file
+          1. **Download** the ZIP or AK3 file for your device. If ZIP unzip to get the AK3 zip file          
+          3. **Flash** the AK2 ZIP file using Kernel Flasher / SukiSU Ultra Manager (to enable KPM)
           4. **Reboot** to system
-          5. **Install** SukiSU Manager APK
-          
+                    
           ## ⚙️ Build Configuration
           - **Hook:** `${{ inputs.hook }}`
           - **LSM:** `${{ inputs.lsm }}`
