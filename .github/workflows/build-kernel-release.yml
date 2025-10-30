@@ -205,11 +205,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ matrix.model }}-${{ matrix.kernel_version }}-${{ github.run_id }}
+          key: ccache-${{ matrix.model }}-${{ matrix.kernel_version }}-${{ github.sha }}
           restore-keys: |
             ccache-${{ matrix.model }}-${{ matrix.kernel_version }}-
             ccache-${{ matrix.model }}-
-          save-always: false
+          save-always: true
 
       - name: Setup Prebuilts Cache
         uses: actions/cache@v4
@@ -221,7 +221,7 @@ jobs:
           restore-keys: |
             prebuilts-${{ matrix.model }}-${{ matrix.kernel_version }}-
             prebuilts-${{ matrix.model }}-
-          save-always: false
+          save-always: true
 
       - name: Build Kernel
         id: build
@@ -276,6 +276,31 @@ jobs:
           
           **Config:** Hook=\`${{ inputs.hook }}\` LSM=\`${{ inputs.lsm }}\` ZRAM=\`${{ inputs.enable_zram }}\` Opt=\`${{ inputs.optimize_level }}\`
           EOF
+
+      - name: Cache Statistics
+        if: always()
+        shell: bash
+        run: |
+          export CCACHE_DIR="$HOME/.ccache"
+          
+          if command -v ccache >/dev/null 2>&1 && [ -d "$CCACHE_DIR" ]; then
+            echo "::group::ccache Final Statistics"
+            ccache -s || true
+            echo "::endgroup::"
+            
+            # Extract hit rate
+            HIT_RATE=$(ccache -s 2>/dev/null | grep "cache hit rate" | awk '{print $NF}' || echo "N/A")
+            CACHE_SIZE=$(du -sh "$CCACHE_DIR" 2>/dev/null | awk '{print $1}' || echo "N/A")
+            
+            cat >> $GITHUB_STEP_SUMMARY << EOF
+          
+          ### 📊 Cache Performance
+          - **ccache Hit Rate:** $HIT_RATE
+          - **Cache Size:** $CACHE_SIZE
+          EOF
+          else
+            echo "ccache not available or cache directory not found"
+          fi
 
       - name: Upload Artifacts
         if: success()
