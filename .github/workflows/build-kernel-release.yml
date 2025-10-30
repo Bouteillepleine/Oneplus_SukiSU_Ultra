@@ -112,7 +112,9 @@ jobs:
           first=true
           for model in "${models[@]}"; do
             file="configs/$model.json"
+            # Validate JSON and required fields
             jq empty "$file" 2>/dev/null || { echo "::warning::Invalid JSON: $file"; continue; }
+            jq -e 'has("model") and has("android_version") and has("kernel_version")' "$file" >/dev/null 2>&1 || { echo "::warning::Missing required fields: $file"; continue; }
             [ "$first" = false ] && echo "," >> matrix.json
             jq -r '.' "$file" >> matrix.json
             first=false
@@ -200,15 +202,42 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Generate Cache Keys
+        id: cache-keys
+        shell: bash
+        run: |
+          set -euo pipefail
+          
+          # Create deterministic hash from matrix config
+          CONFIG_HASH=$(echo "${{ toJSON(matrix) }}" | sha256sum | cut -d' ' -f1 | cut -c1-8)
+          
+          # Ccache key - unique per device configuration (base key used for restore)
+          CCACHE_KEY="ccache-${{ matrix.model }}-${{ matrix.kernel_version }}-${{ matrix.android_version }}-${CONFIG_HASH}"
+          
+          # Prebuilts key - shared across similar configs; includes config file hash
+          PREBUILTS_HASH="${{ hashFiles(format('configs/{0}.json', matrix.model)) }}"
+          PREBUILTS_KEY="prebuilts-${{ matrix.model }}-${{ matrix.kernel_version }}-${PREBUILTS_HASH}"
+          
+          echo "ccache_key=$CCACHE_KEY" >> $GITHUB_OUTPUT
+          echo "prebuilts_key=$PREBUILTS_KEY" >> $GITHUB_OUTPUT
+          
+          echo "::group::Generated Cache Keys"
+          echo "Config Hash: $CONFIG_HASH"
+          echo "Ccache Key: $CCACHE_KEY"
+          echo "Prebuilts Key: $PREBUILTS_KEY"
+          echo "::endgroup::"
+
       - name: Restore Compiler Cache
         id: cache-ccache-restore
         uses: actions/cache/restore@v4
         with:
           path: ~/.ccache
-          key: ccache-${{ matrix.model }}-${{ matrix.kernel_version }}-${{ github.sha }}
+          key: ${{ steps.cache-keys.outputs.ccache_key }}
           restore-keys: |
+            ccache-${{ matrix.model }}-${{ matrix.kernel_version }}-${{ matrix.android_version }}-
             ccache-${{ matrix.model }}-${{ matrix.kernel_version }}-
             ccache-${{ matrix.model }}-
+          enableCrossOsArchive: false
 
       - name: Restore Prebuilts Cache
         id: cache-prebuilts-restore
@@ -217,10 +246,35 @@ jobs:
           path: |
             ${{ matrix.model }}/kernel_platform/prebuilts
             ${{ matrix.model }}/kernel_platform/prebuilts-master
-          key: prebuilts-${{ matrix.model }}-${{ matrix.kernel_version }}-${{ hashFiles(format('configs/{0}.json', matrix.model)) }}
+          key: ${{ steps.cache-keys.outputs.prebuilts_key }}
           restore-keys: |
             prebuilts-${{ matrix.model }}-${{ matrix.kernel_version }}-
             prebuilts-${{ matrix.model }}-
+          enableCrossOsArchive: false
+
+      - name: Cache Debug Info
+        shell: bash
+        run: |
+          echo "::group::Cache Restore Status"
+          echo "Ccache Hit: ${{ steps.cache-ccache-restore.outputs.cache-hit }}"
+          echo "Ccache Matched Key: ${{ steps.cache-ccache-restore.outputs.cache-matched-key || 'none' }}"
+          echo "Prebuilts Hit: ${{ steps.cache-prebuilts-restore.outputs.cache-hit }}"
+          echo "Prebuilts Matched Key: ${{ steps.cache-prebuilts-restore.outputs.cache-matched-key || 'none' }}"
+          echo ""
+          
+          # Show cache sizes if they exist
+          if [ -d ~/.ccache ]; then
+            echo "Ccache size: $(du -sh ~/.ccache 2>/dev/null | awk '{print $1}' || echo '0')"
+          else
+            echo "Ccache: not restored (cold start)"
+          fi
+          
+          if [ -d "${{ matrix.model }}/kernel_platform/prebuilts" ]; then
+            echo "Prebuilts size: $(du -sh ${{ matrix.model }}/kernel_platform/prebuilts 2>/dev/null | awk '{print $1}' || echo '0')"
+          else
+            echo "Prebuilts: not restored (will download)"
+          fi
+          echo "::endgroup::"
 
       - name: Build Kernel
         id: build
@@ -250,7 +304,15 @@ jobs:
               zip_size) v="${{ steps.build.outputs.zip_size }}" ;;
               zip_sha256) v="${{ steps.build.outputs.zip_sha256 }}" ;;
             esac
-            [ -z "$v" ] && { echo "::error::Missing: $out"; ((missing++)); } || echo "✅ $out"
+            if [ -z "${v:-}" ]; then
+              echo "::error::Missing: $out"; ((missing++))
+            else
+              if [ "$out" = "warnings_count" ] && ! [[ "$v" =~ ^[0-9]+$ ]]; then
+                echo "::error::warnings_count not numeric: $v"; ((missing++))
+              else
+                echo "✅ $out"
+              fi
+            fi
           done
           [ $missing -gt 0 ] && exit 1 || exit 0
 
@@ -276,11 +338,61 @@ jobs:
           **Config:** Hook=\`${{ inputs.hook }}\` LSM=\`${{ inputs.lsm }}\` ZRAM=\`${{ inputs.enable_zram }}\` Opt=\`${{ inputs.optimize_level }}\`
           EOF
 
+      - name: Prepare Cache Directories
+        if: always()
+        shell: bash
+        run: |
+          echo "::group::Prepare Cache Directories"
+          
+          # Ensure ccache directory exists
+          mkdir -p ~/.ccache
+          
+          # Ensure prebuilts directories exist (even if empty)
+          if [ -d "${{ matrix.model }}" ]; then
+            mkdir -p "${{ matrix.model }}/kernel_platform/prebuilts"
+            mkdir -p "${{ matrix.model }}/kernel_platform/prebuilts-master"
+          fi
+          
+          # Show cache sizes before save
+          echo "Cache directory sizes before save:"
+          du -sh ~/.ccache 2>/dev/null || echo "  ~/.ccache: empty"
+          du -sh "${{ matrix.model }}/kernel_platform/prebuilts" 2>/dev/null || echo "  prebuilts: empty"
+          du -sh "${{ matrix.model }}/kernel_platform/prebuilts-master" 2>/dev/null || echo "  prebuilts-master: empty"
+          
+          echo "::endgroup::"
+
+      - name: Save Compiler Cache
+        id: cache-ccache-save
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ccache
+          # Use unique key with run_id+attempt to prevent collisions
+          key: ${{ steps.cache-keys.outputs.ccache_key }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save Prebuilts Cache
+        id: cache-prebuilts-save
+        # Only attempt to save when there wasn't an exact restore hit to avoid contention
+        if: always() && steps.cache-prebuilts-restore.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ matrix.model }}/kernel_platform/prebuilts
+            ${{ matrix.model }}/kernel_platform/prebuilts-master
+          # Make save key unique per run to eliminate reservation races across matrix jobs
+          key: ${{ steps.cache-keys.outputs.prebuilts_key }}-${{ github.run_id }}-${{ github.run_attempt }}
+
       - name: Cache Statistics
         if: always()
         shell: bash
         run: |
           export CCACHE_DIR="$HOME/.ccache"
+          
+          echo "::group::Cache Save Status"
+          echo "Ccache Save: ${{ steps.cache-ccache-save.outcome }}"
+          echo "Prebuilts Save: ${{ steps.cache-prebuilts-save.outcome }}"
+          echo "::endgroup::"
           
           if command -v ccache >/dev/null 2>&1 && [ -d "$CCACHE_DIR" ]; then
             echo "::group::ccache Final Statistics"
@@ -304,13 +416,36 @@ jobs:
             RESTORED_KEY="${{ steps.cache-ccache-restore.outputs.cache-matched-key }}"
             [ -z "$RESTORED_KEY" ] && RESTORED_KEY="none"
             
+            # Determine save status emoji
+            if [ "${{ steps.cache-ccache-save.outcome }}" = "success" ]; then
+              CCACHE_SAVE_STATUS="✅ Saved"
+            else
+              CCACHE_SAVE_STATUS="⚠️ Failed"
+            fi
+            
+            if [ "${{ steps.cache-prebuilts-save.outcome }}" = "success" ]; then
+              PREBUILTS_SAVE_STATUS="✅ Saved"
+            elif [ "${{ steps.cache-prebuilts-save.outcome }}" = "skipped" ]; then
+              PREBUILTS_SAVE_STATUS="⏭️ Skipped (collision or exact hit)"
+            else
+              PREBUILTS_SAVE_STATUS="⚠️ Failed"
+            fi
+            
             cat >> $GITHUB_STEP_SUMMARY << EOF
           
           ### 📊 Cache Performance
+          
+          #### Restore
           - **Status:** $CACHE_STATUS
+          - **Restored Key:** \`$RESTORED_KEY\`
+          
+          #### Build
           - **Hit Rate:** $HIT_RATE
           - **Cache Size:** $CACHE_SIZE
-          - **Restored Key:** \`$RESTORED_KEY\`
+          
+          #### Save
+          - **Ccache:** $CCACHE_SAVE_STATUS
+          - **Prebuilts:** $PREBUILTS_SAVE_STATUS
           EOF
           else
             echo "ccache not available or cache directory not found"
@@ -327,45 +462,6 @@ jobs:
           retention-days: 7
           compression-level: 0
           if-no-files-found: error
-
-      - name: Prepare Cache Directories
-        if: always()
-        shell: bash
-        run: |
-          echo "::group::Prepare cache directories"
-          
-          # Ensure ccache directory exists
-          mkdir -p ~/.ccache
-          
-          # Ensure prebuilts directories exist (even if empty)
-          if [ -d "${{ matrix.model }}" ]; then
-            mkdir -p "${{ matrix.model }}/kernel_platform/prebuilts"
-            mkdir -p "${{ matrix.model }}/kernel_platform/prebuilts-master"
-          fi
-          
-          # Show cache sizes
-          echo "Cache directory sizes:"
-          du -sh ~/.ccache 2>/dev/null || echo "  ~/.ccache: empty"
-          du -sh "${{ matrix.model }}/kernel_platform/prebuilts" 2>/dev/null || echo "  prebuilts: empty"
-          du -sh "${{ matrix.model }}/kernel_platform/prebuilts-master" 2>/dev/null || echo "  prebuilts-master: empty"
-          
-          echo "::endgroup::"
-
-      - name: Save Compiler Cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.ccache
-          key: ${{ steps.cache-ccache-restore.outputs.cache-primary-key }}
-
-      - name: Save Prebuilts Cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ${{ matrix.model }}/kernel_platform/prebuilts
-            ${{ matrix.model }}/kernel_platform/prebuilts-master
-          key: ${{ steps.cache-prebuilts-restore.outputs.cache-primary-key }}
 
       - name: Cleanup on Cancel
         if: cancelled()
@@ -399,6 +495,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./all-artifacts
 
       - name: Check gh CLI
         shell: bash
@@ -476,8 +577,9 @@ jobs:
           
           # Debug: Show artifact structure with count (pipefail-safe)
           echo "Artifact directory structure (first 50):"
-          (set -o pipefail; LC_ALL=C find ./all-artifacts \( -type f -name "*.zip" -o -type f -name "build_info.txt" \) \
-            | tee >(wc -l >&2) | head -50)
+          (set -o pipefail; LC_ALL=C find ./all-artifacts \( -type f -name "*.zip" -o -type f -name "build_info.txt" \) -print \
+            | tee >(awk 'END{print "Total files found: " NR > "/dev/stderr"}') \
+            | head -50) || true
           echo ""
           
           # Copy kernel ZIPs with duplicate protection
@@ -496,12 +598,10 @@ jobs:
               base="${filename%.*}"
               ext="${filename##*.}"
               if [ "$ext" != "$filename" ]; then
-                # Has extension
                 while [ -e "./release-assets/${base}_$n.$ext" ]; do n=$((n+1)); done
                 dest="./release-assets/${base}_$n.$ext"
                 echo "  Found ZIP (duplicate, renamed): $filename -> $(basename "$dest")"
               else
-                # No extension
                 while [ -e "./release-assets/${filename}_$n" ]; do n=$((n+1)); done
                 dest="./release-assets/${filename}_$n"
                 echo "  Found ZIP (duplicate, renamed): $filename -> $(basename "$dest")"
@@ -554,9 +654,8 @@ jobs:
             fi
             
             if [ -n "$model" ]; then
-              # Normalize: collapse whitespace, remove slashes, keep only safe chars
-              # Expand allowed set if Unicode/punctuation needed: tr -cd 'A-Za-z0-9_-'
-              model=$(echo "$model" | tr -s '[:space:]' ' ' | sed 's/[[:space:]]\+/_/g' | tr '/' '_' | tr -cd 'A-Za-z0-9_-')
+              # Normalize: collapse whitespace, remove slashes, keep only safe chars (allow dot)
+              model=$(echo "$model" | tr -s '[:space:]' ' ' | sed 's/[[:space:]]\+/_/g' | tr '/' '_' | tr -cd 'A-Za-z0-9_.-')
               dest="./release-assets/build_info_${model}.txt"
               # Avoid overwriting if multiple artifacts share model
               if [ -e "$dest" ]; then
@@ -568,7 +667,7 @@ jobs:
               cp -- "$info" "$dest"
               ((info_count++))
             else
-              safe_name=$(echo "$dir_name" | tr -s '[:space:]' ' ' | sed 's/[[:space:]]\+/_/g' | tr '/' '_' | tr -cd 'A-Za-z0-9_-')
+              safe_name=$(echo "$dir_name" | tr -s '[:space:]' ' ' | sed 's/[[:space:]]\+/_/g' | tr '/' '_' | tr -cd 'A-Za-z0-9_.-')
               dest="./release-assets/build_info_${safe_name}.txt"
               if [ -e "$dest" ]; then
                 n=2
@@ -606,7 +705,6 @@ jobs:
             echo "✅ Organized $zip_count kernel ZIP(s) and $info_count build info file(s)"
           fi
 
-
       - name: Generate Release Notes
         shell: bash
         run: |
@@ -638,7 +736,7 @@ jobs:
             # Find corresponding ZIP and verify SUSFS module
             zip_file=$(find ./release-assets -name "*${model}*.zip" -type f 2>/dev/null | head -1)
             
-            if [ -n "$zip_file" ] && [ -f "$zip_file" ] && unzip -l "$zip_file" 2>/dev/null | grep -q "ksu_module_susfs"; then
+            if [ -n "$zip_file" ] && [ -f "$zip_file" ] && command -v unzip >/dev/null 2>&1 && unzip -l "$zip_file" 2>/dev/null | grep -q "ksu_module_susfs"; then
               status="✅"
             else
               status="⚠️"
@@ -677,8 +775,8 @@ jobs:
           
           ## 📥 Installation
           1. **Download** the ZIP or AK3 file for your device. If ZIP unzip to get the AK3 zip file          
-          3. **Flash** the AK2 ZIP file using Kernel Flasher / SukiSU Ultra Manager (to enable KPM)
-          4. **Reboot** to system
+          2. **Flash** via Kernel Flasher / SukiSU Ultra Manager (to enable KPM)
+          3. **Reboot** to system
                     
           ## ⚙️ Build Configuration
           - **Hook:** `${{ inputs.hook }}`
@@ -704,6 +802,9 @@ jobs:
           **Commit:** ${{ github.sha }}  
           **Workflow:** ${{ github.workflow }}
           EOF
+          
+          # Ensure trailing newline
+          printf '\n' >> notes.md
           
           echo "Generated release notes for $device_count device(s)"
           
@@ -743,8 +844,8 @@ jobs:
           
           echo "::endgroup::"
           
-          # Create release with all assets in one atomic operation
-          for attempt in {1..3}; do
+          # Create release with retries and jitter backoff
+          for attempt in 1 2 3; do
             echo "::group::Attempt $attempt/3: Creating release ${{ env.NEW_TAG }}"
             
             if gh release create "${{ env.NEW_TAG }}" \
@@ -764,7 +865,7 @@ jobs:
             echo "⚠️ Attempt $attempt failed"
             
             if [ $attempt -lt 3 ]; then
-              sleep_time=$((attempt * 5))
+              sleep_time=$(( (RANDOM % (attempt * 5)) + attempt * 3 ))
               echo "Retrying in ${sleep_time}s..."
               sleep $sleep_time
             fi
@@ -833,20 +934,18 @@ jobs:
           EOF
           
           if [ "$status" = "success" ]; then
-            # Fetch actual uploaded assets from release
             gh release view "${{ env.NEW_TAG }}" \
               --repo "${{ github.repository }}" \
               --json assets \
               --jq '.assets[] | "- `\(.name)` (\((.size | tonumber) / 1048576 | floor)MB)"' \
               >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "- Could not fetch asset list" >> $GITHUB_STEP_SUMMARY
           else
-            # Show what we tried to upload
             find ./release-assets -name "*.zip" -type f 2>/dev/null | sort | while read -r f; do
               filename=$(basename "$f")
               size_bytes=$(stat -c%s "$f" 2>/dev/null || echo "0")
               size_mb=$((size_bytes / 1048576))
               
-              if unzip -l "$f" 2>/dev/null | grep -q "ksu_module_susfs"; then
+              if command -v unzip >/dev/null 2>&1 && unzip -l "$f" 2>/dev/null | grep -q "ksu_module_susfs"; then
                 status_icon="✅"
               else
                 status_icon="⚠️"
