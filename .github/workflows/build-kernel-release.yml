@@ -804,154 +804,129 @@ jobs:
       - name: Organize Assets
         shell: bash
         run: |
+          #!/usr/bin/env bash
           set -euo pipefail
-          
-          echo "::group::Organizing artifacts"
-          
-          # Enhanced error handling and logging
+      
+          echo "::group::Organizing Artifacts"
+      
           log_error() {
-            echo "::error::$1"
-            exit 1
+              echo "::error::$1"
+              exit 1
           }
-          
+      
           log_warning() {
-            echo "::warning::$1"
+              echo "::warning::$1"
           }
-          
-          # Safer directory creation
+      
           mkdir -p ./all-artifacts ./release-assets || log_error "Failed to create directories"
-          
-          # Validate artifact directory
           [ -d ./all-artifacts ] || log_error "all-artifacts directory does not exist"
-          
-          # Robust file counting with error handling
+      
           file_count=$(find ./all-artifacts -maxdepth 10 -type f \( -name "*.zip" -o -name "build_info.txt" \) 2>/dev/null | wc -l | tr -d '[:space:]') || file_count=0
-          
-          # Exit if no files found
           [ "$file_count" -eq 0 ] && log_error "No artifacts found under ./all-artifacts"
-          
+      
           echo "Total files to process: $file_count"
           echo ""
-          
-          # Enhanced counters with type declaration
+      
           declare -i zip_count=0
           declare -i info_count=0
           declare -i skipped_count=0
-          
-          # Safer filename generation function
+      
           safe_filename() {
-            local filename="$1"
-            # Remove special characters, replace spaces
-            echo "$filename" | tr -cs '[:alnum:]._-' '_' | sed -E 's/^[._-]+|[._-]+$//g'
+              local filename="$1"
+              echo "$filename" | tr -cs '[:alnum:]._-' '_' | sed -E 's/^[._-]+|[._-]+$//g' | cut -c1-255
           }
-          
-          # Copy kernel ZIPs with improved error handling
+      
+          log_file_processing() {
+              local type="$1"
+              local filename="$2"
+              local dest="$3"
+              echo "[${type^^}] Processing: $filename -> $(basename "$dest")"
+          }
+      
           while IFS= read -r -d '' zip; do
-            # Validate file
-            [ -f "$zip" ] || {
-              log_warning "Matched as zip but not a regular file: $zip"
-              continue
-            }
-            
-            filename=$(basename -- "$zip")
-            safe_name=$(safe_filename "$filename")
-            dest="./release-assets/$safe_name"
-            
-            # Handle duplicate filenames
-            counter=1
-            while [ -e "$dest" ]; do
-              dest="./release-assets/${safe_name%.*}_${counter}.${safe_name##*.}"
-              ((counter++))
-            done
-            
-            # Verbose copy with error checking
-            if cp -v "$zip" "$dest"; then
-              echo "  Found ZIP: $filename"
-              ((zip_count++))
-            else
-              log_warning "Failed to copy ZIP: $zip"
-            fi
-          done < <(LC_ALL=C find ./all-artifacts -type f -name "*.zip" -print0 2>/dev/null | LC_ALL=C sort -z)
-          
-          # Copy build info files with enhanced model extraction
-          while IFS= read -r -d '' info; do
-            # Skip empty files
-            [ -s "$info" ] || {
-              log_warning "Empty build_info file: $info"
-              continue
-            }
-            
-            # Normalize line endings
-            dos2unix -q "$info" 2>/dev/null || true
-            
-            artifact_dir=$(dirname -- "$info")
-            dir_name=$(basename -- "$artifact_dir")
-            
-            # Advanced model extraction with regex
-            model=""
-            extraction_patterns=(
-              '^kernel-(.+)-android([0-9]+)-([0-9.]+)$'
-              '^kernel-(.+)-android([0-9]+)$'
-              '^kernel-(.+)$'
-            )
-            
-            for pattern in "${extraction_patterns[@]}"; do
-              if [[ "$dir_name" =~ $pattern ]]; then
-                model="${BASH_REMATCH[1]}"
-                break
-              fi
-            done
-            
-            # Fallback to file content
-            if [ -z "$model" ]; then
-              model=$(grep -m1 '^Model:' "$info" 2>/dev/null | cut -d: -f2- | xargs | tr -s '[:space:]' '_' | tr -cd '[:alnum:]_.-' || true)
-            fi
-            
-            # Sanitize model name
-            model=$(safe_filename "${model:-unknown}")
-            
-            # Prepare destination
-            dest="./release-assets/build_info_${model}.txt"
-            
-            # Handle duplicate info files
-            counter=1
-            while [ -e "$dest" ]; do
-              dest="./release-assets/build_info_${model}_${counter}.txt"
-              ((counter++))
-            done
-            
-            # Copy with tracking
-            if cp -v "$info" "$dest"; then
-              if [ -n "$model" ] && [ "$model" != "unknown" ]; then
-                echo "  ✅ Found build info: $model (from: $dir_name)"
-                ((info_count++))
+              [ -f "$zip" ] && [ -r "$zip" ] || { log_warning "Skipping unreadable zip file: $zip"; continue; }
+              filename=$(basename -- "$zip")
+              safe_name=$(safe_filename "$filename")
+              dest="./release-assets/$safe_name"
+              counter=1
+              while [ -e "$dest" ]; do
+                  dest="./release-assets/${safe_name%.*}_${counter}.${safe_name##*.}"
+                  ((counter++))
+              done
+              if cp -v --preserve=mode,ownership "$zip" "$dest"; then
+                  log_file_processing "zip" "$filename" "$dest"
+                  ((zip_count++))
               else
-                echo "  ⚠️ Could not parse model from: $dir_name; using fallback name"
-                ((skipped_count++))
+                  log_warning "Failed to copy ZIP: $zip"
               fi
-            else
-              log_warning "Failed to copy build info: $info"
-            fi
+          done < <(LC_ALL=C find ./all-artifacts -type f -name "*.zip" -print0 2>/dev/null | LC_ALL=C sort -z)
+      
+          while IFS= read -r -d '' info; do
+              [ -s "$info" ] && [ -r "$info" ] || { log_warning "Skipping empty/unreadable build info: $info"; continue; }
+              dos2unix -q "$info" 2>/dev/null || true
+              artifact_dir=$(dirname -- "$info")
+              dir_name=$(basename -- "$artifact_dir")
+      
+              model=""
+              extraction_patterns=(
+                  '^kernel-(.+)-android([0-9]+)-([0-9.]+)$'
+                  '^kernel-(.+)-android([0-9]+)$'
+                  '^kernel-(.+)$'
+              )
+              for pattern in "${extraction_patterns[@]}"; do
+                  if [[ "$dir_name" =~ $pattern ]]; then
+                      model="${BASH_REMATCH[1]}"
+                      break
+                  fi
+              done
+              if [ -z "$model" ]; then
+                  model=$(grep -m1 '^Model:' "$info" 2>/dev/null | cut -d: -f2- | xargs | tr -s '[:space:]' '_' | tr -cd '[:alnum:]_.-' || true)
+              fi
+              model=$(safe_filename "${model:-unknown}" | cut -c1-100)
+      
+              dest="./release-assets/build_info_${model}.txt"
+              counter=1
+              while [ -e "$dest" ]; do
+                  dest="./release-assets/build_info_${model}_${counter}.txt"
+                  ((counter++))
+              done
+      
+              if cp -v --preserve=mode,ownership "$info" "$dest"; then
+                  if [ -n "$model" ] && [ "$model" != "unknown" ]; then
+                      log_file_processing "info" "$info" "$dest"
+                      ((info_count++))
+                  else
+                      log_warning "Could not parse model from: $dir_name; using fallback name"
+                      ((skipped_count++))
+                  fi
+              else
+                  log_warning "Failed to copy build info: $info"
+              fi
           done < <(LC_ALL=C find ./all-artifacts -type f -name "build_info.txt" -print0 2>/dev/null | LC_ALL=C sort -z)
-          
+      
           echo "::endgroup::"
-          
-          # Final summary and validation
+      
           echo ""
-          echo "Release assets summary:"
+          echo "Release Assets Summary:"
           ls -lh ./release-assets/ 2>/dev/null || echo "No files in release-assets/"
-          
-          # Strict validation
-          [ "$zip_count" -eq 0 ] && log_error "No kernel ZIPs found after organizing!"
-          
+      
+          if [ "$zip_count" -eq 0 ]; then
+              log_error "No kernel ZIPs found after organizing!"
+          fi
+      
           total_info=$((info_count + skipped_count))
           if [ "$total_info" -eq 0 ]; then
-            log_warning "No build_info files were processed!"
+              log_warning "No build_info files were processed!"
           elif [ "$skipped_count" -gt 0 ]; then
-            echo "⚠️ Organized $zip_count kernel ZIP(s) and $total_info build info file(s) ($skipped_count with fallback names)"
+              echo "⚠️ Organized $zip_count kernel ZIP(s) and $total_info build info file(s) ($skipped_count with fallback names)"
           else
-            echo "✅ Organized $zip_count kernel ZIP(s) and $info_count build info file(s)"
+              echo "✅ Organized $zip_count kernel ZIP(s) and $info_count build info file(s)"
           fi
+      
+          echo ""
+          echo "Detailed File Breakdown:"
+          find ./release-assets -type f | awk -F. '{print $NF}' | sort | uniq -c
+          du -ch ./release-assets/* 2>/dev/null | sort -hr
   
       - name: Generate Release Notes
         shell: bash
