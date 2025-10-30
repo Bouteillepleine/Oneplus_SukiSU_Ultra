@@ -211,10 +211,10 @@ jobs:
           # Create deterministic hash from matrix config
           CONFIG_HASH=$(echo "${{ toJSON(matrix) }}" | sha256sum | cut -d' ' -f1 | cut -c1-8)
           
-          # Ccache key - unique per device configuration (base key used for restore)
+          # Ccache key - unique per device configuration
           CCACHE_KEY="ccache-${{ matrix.model }}-${{ matrix.kernel_version }}-${{ matrix.android_version }}-${CONFIG_HASH}"
           
-          # Prebuilts key - shared across similar configs; includes config file hash
+          # Prebuilts key - shared across similar configs
           PREBUILTS_HASH="${{ hashFiles(format('configs/{0}.json', matrix.model)) }}"
           PREBUILTS_KEY="prebuilts-${{ matrix.model }}-${{ matrix.kernel_version }}-${PREBUILTS_HASH}"
           
@@ -262,7 +262,6 @@ jobs:
           echo "Prebuilts Matched Key: ${{ steps.cache-prebuilts-restore.outputs.cache-matched-key || 'none' }}"
           echo ""
           
-          # Show cache sizes if they exist
           if [ -d ~/.ccache ]; then
             echo "Ccache size: $(du -sh ~/.ccache 2>/dev/null | awk '{print $1}' || echo '0')"
           else
@@ -344,16 +343,13 @@ jobs:
         run: |
           echo "::group::Prepare Cache Directories"
           
-          # Ensure ccache directory exists
           mkdir -p ~/.ccache
           
-          # Ensure prebuilts directories exist (even if empty)
           if [ -d "${{ matrix.model }}" ]; then
             mkdir -p "${{ matrix.model }}/kernel_platform/prebuilts"
             mkdir -p "${{ matrix.model }}/kernel_platform/prebuilts-master"
           fi
           
-          # Show cache sizes before save
           echo "Cache directory sizes before save:"
           du -sh ~/.ccache 2>/dev/null || echo "  ~/.ccache: empty"
           du -sh "${{ matrix.model }}/kernel_platform/prebuilts" 2>/dev/null || echo "  prebuilts: empty"
@@ -367,12 +363,10 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ~/.ccache
-          # Use unique key with run_id+attempt to prevent collisions
           key: ${{ steps.cache-keys.outputs.ccache_key }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Save Prebuilts Cache
         id: cache-prebuilts-save
-        # Only attempt to save when there wasn't an exact restore hit to avoid contention
         if: always() && steps.cache-prebuilts-restore.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@v4
@@ -380,7 +374,6 @@ jobs:
           path: |
             ${{ matrix.model }}/kernel_platform/prebuilts
             ${{ matrix.model }}/kernel_platform/prebuilts-master
-          # Make save key unique per run to eliminate reservation races across matrix jobs
           key: ${{ steps.cache-keys.outputs.prebuilts_key }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Cache Statistics
@@ -399,11 +392,9 @@ jobs:
             ccache -s || true
             echo "::endgroup::"
             
-            # Extract hit rate
             HIT_RATE=$(ccache -s 2>/dev/null | grep "cache hit rate" | awk '{print $NF}' || echo "N/A")
             CACHE_SIZE=$(du -sh "$CCACHE_DIR" 2>/dev/null | awk '{print $1}' || echo "N/A")
             
-            # Determine cache status
             if [ "${{ steps.cache-ccache-restore.outputs.cache-hit }}" = "true" ]; then
               CACHE_STATUS="✅ Exact match"
             elif [ -n "${{ steps.cache-ccache-restore.outputs.cache-matched-key }}" ]; then
@@ -412,11 +403,9 @@ jobs:
               CACHE_STATUS="❌ Cold start"
             fi
             
-            # Safe fallback for restored key
             RESTORED_KEY="${{ steps.cache-ccache-restore.outputs.cache-matched-key }}"
             [ -z "$RESTORED_KEY" ] && RESTORED_KEY="none"
             
-            # Determine save status emoji
             if [ "${{ steps.cache-ccache-save.outcome }}" = "success" ]; then
               CCACHE_SAVE_STATUS="✅ Saved"
             else
@@ -426,7 +415,7 @@ jobs:
             if [ "${{ steps.cache-prebuilts-save.outcome }}" = "success" ]; then
               PREBUILTS_SAVE_STATUS="✅ Saved"
             elif [ "${{ steps.cache-prebuilts-save.outcome }}" = "skipped" ]; then
-              PREBUILTS_SAVE_STATUS="⏭️ Skipped (collision or exact hit)"
+              PREBUILTS_SAVE_STATUS="⏭️ Skipped (exact hit)"
             else
               PREBUILTS_SAVE_STATUS="⚠️ Failed"
             fi
@@ -469,10 +458,8 @@ jobs:
         run: |
           echo "::warning::Build cancelled for ${{ matrix.model }}"
           
-          # Clean artifacts and build outputs (preserve cache dirs)
           rm -rf "${{ matrix.model }}/artifacts" "${{ matrix.model }}/out" "${{ matrix.model }}/downloads" || true
           
-          # Clean kernel_platform but preserve prebuilts
           if [ -d "${{ matrix.model }}/kernel_platform" ]; then
             find "${{ matrix.model }}/kernel_platform" -mindepth 1 -maxdepth 1 \
               ! -name "prebuilts" ! -name "prebuilts-master" \
@@ -517,7 +504,6 @@ jobs:
           BASE_VERSION="v1.5.2"
           
           echo "::group::Fetching existing releases"
-          # Get all tags matching our pattern and sort numerically
           LATEST=$(gh release list \
             --repo "${{ github.repository }}" \
             --limit 300 \
@@ -543,7 +529,6 @@ jobs:
           echo "NEW_TAG=$NEW_TAG" >> $GITHUB_ENV
           echo "📌 Tag to be created: $NEW_TAG"
           
-          # Auto-detect prerelease based on tag name
           if [[ "$NEW_TAG" =~ (alpha|beta|rc|test|dev|pre) ]]; then
             echo "IS_PRERELEASE=true" >> $GITHUB_ENV
             echo "🔬 Detected as prerelease"
@@ -556,125 +541,84 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          set -x
           
           echo "::group::Organizing artifacts"
           
-          # Validate artifact directory exists
-          if [ ! -d ./all-artifacts ]; then
-            echo "::error::./all-artifacts directory not found"
-            echo "Current directory contents:"
-            ls -la
-            exit 1
-          fi
+          [ ! -d ./all-artifacts ] && { echo "::error::./all-artifacts not found"; ls -la; exit 1; }
           
-          # Sanity check: ensure release-assets is a directory
-          if [ -e ./release-assets ] && [ ! -d ./release-assets ]; then
-            echo "::warning::release-assets exists but is not a directory, removing..."
-            rm -f ./release-assets
-          fi
+          [ -e ./release-assets ] && [ ! -d ./release-assets ] && rm -f ./release-assets
           mkdir -p ./release-assets
           
-          # Debug: Show artifact structure with count (pipefail-safe)
           echo "Artifact directory structure (first 50):"
-          (set -o pipefail; LC_ALL=C find ./all-artifacts \( -type f -name "*.zip" -o -type f -name "build_info.txt" \) -print \
-            | tee >(awk 'END{print "Total files found: " NR > "/dev/stderr"}') \
+          (LC_ALL=C find ./all-artifacts \( -type f -name "*.zip" -o -type f -name "build_info.txt" \) -print \
+            | tee >(awk 'END{print "Total files: " NR > "/dev/stderr"}') \
             | head -50) || true
           echo ""
           
-          # Copy kernel ZIPs with duplicate protection
+          # Copy ZIPs with duplicate handling
           zip_count=0
           while IFS= read -r -d '' zip; do
-            if [ ! -f "$zip" ]; then
-              echo "::warning::Matched as zip but not a regular file: $zip"
-              continue
-            fi
+            [ ! -f "$zip" ] && continue
             filename=$(basename -- "$zip")
             dest="./release-assets/$filename"
             
-            # Handle duplicate filenames from different subdirectories
             if [ -e "$dest" ]; then
               n=2
               base="${filename%.*}"
               ext="${filename##*.}"
-              if [ "$ext" != "$filename" ]; then
+              [ "$ext" != "$filename" ] && {
                 while [ -e "./release-assets/${base}_$n.$ext" ]; do n=$((n+1)); done
                 dest="./release-assets/${base}_$n.$ext"
-                echo "  Found ZIP (duplicate, renamed): $filename -> $(basename "$dest")"
-              else
+              } || {
                 while [ -e "./release-assets/${filename}_$n" ]; do n=$((n+1)); done
                 dest="./release-assets/${filename}_$n"
-                echo "  Found ZIP (duplicate, renamed): $filename -> $(basename "$dest")"
-              fi
+              }
+              echo "  ZIP (renamed): $filename -> $(basename "$dest")"
             else
-              echo "  Found ZIP: $filename"
+              echo "  ZIP: $filename"
             fi
             
             cp -- "$zip" "$dest"
             ((zip_count++))
           done < <(LC_ALL=C find ./all-artifacts -type f -name "*.zip" -print0 | LC_ALL=C sort -z)
           
-          # Copy build info files with model-specific naming
+          # Copy build_info files
           info_count=0
           skipped_count=0
           while IFS= read -r -d '' info; do
-            # Warn if build_info file is empty
-            if [ ! -s "$info" ]; then
-              echo "::warning::Empty build_info file: $info"
-              continue
-            fi
+            [ ! -s "$info" ] && { echo "::warning::Empty: $info"; continue; }
             
-            # Normalize CRLF to LF if dos2unix is available
-            if command -v dos2unix >/dev/null 2>&1; then
-              dos2unix -q "$info" 2>/dev/null || true
-            fi
+            command -v dos2unix >/dev/null 2>&1 && dos2unix -q "$info" 2>/dev/null || true
             
-            artifact_dir=$(dirname -- "$info")
-            dir_name=$(basename -- "$artifact_dir")
-            echo "  Processing: $dir_name"
+            dir_name=$(basename -- "$(dirname -- "$info")")
             
             model=""
-            if [[ "$dir_name" =~ ^kernel-(.+)-android([0-9]+)-([0-9.]+)$ ]]; then
-              model="${BASH_REMATCH[1]}"
-              echo "    Matched Pattern 1: model=$model"
-            elif [[ "$dir_name" =~ ^kernel-(.+)-android([0-9]+)$ ]]; then
-              model="${BASH_REMATCH[1]}"
-              echo "    Matched Pattern 2: model=$model"
-            elif [[ "$dir_name" =~ ^kernel-(.+)$ ]]; then
-              model="${BASH_REMATCH[1]}"
-              echo "    Matched Pattern 3: model=$model"
-            fi
+            [[ "$dir_name" =~ ^kernel-(.+)-android([0-9]+)-([0-9.]+)$ ]] && model="${BASH_REMATCH[1]}"
+            [[ -z "$model" && "$dir_name" =~ ^kernel-(.+)-android([0-9]+)$ ]] && model="${BASH_REMATCH[1]}"
+            [[ -z "$model" && "$dir_name" =~ ^kernel-(.+)$ ]] && model="${BASH_REMATCH[1]}"
             
-            # Fallback: read Model: from file if not parsed (locale-safe)
-            if [ -z "$model" ]; then
-              LC_ALL=C model=$(grep -m1 '^Model:' "$info" | cut -d: -f2- | xargs || true)
-              if [ -n "$model" ]; then
-                echo "    Fallback Model from file: $model"
-              fi
-            fi
+            [ -z "$model" ] && model=$(LC_ALL=C grep -m1 '^Model:' "$info" | cut -d: -f2- | xargs || true)
             
             if [ -n "$model" ]; then
-              # Normalize: collapse whitespace, remove slashes, keep only safe chars (allow dot)
               model=$(echo "$model" | tr -s '[:space:]' ' ' | sed 's/[[:space:]]\+/_/g' | tr '/' '_' | tr -cd 'A-Za-z0-9_.-')
               dest="./release-assets/build_info_${model}.txt"
-              # Avoid overwriting if multiple artifacts share model
               if [ -e "$dest" ]; then
                 n=2
                 while [ -e "./release-assets/build_info_${model}_$n.txt" ]; do n=$((n+1)); done
                 dest="./release-assets/build_info_${model}_$n.txt"
               fi
-              echo "  ✅ Found build info: $model (from: $dir_name) -> $(basename "$dest")"
+              echo "  ✅ Info: $model"
               cp -- "$info" "$dest"
               ((info_count++))
             else
               safe_name=$(echo "$dir_name" | tr -s '[:space:]' ' ' | sed 's/[[:space:]]\+/_/g' | tr '/' '_' | tr -cd 'A-Za-z0-9_.-')
               dest="./release-assets/build_info_${safe_name}.txt"
-              if [ -e "$dest" ]; then
+              [ -e "$dest" ] && {
                 n=2
                 while [ -e "./release-assets/build_info_${safe_name}_$n.txt" ]; do n=$((n+1)); done
                 dest="./release-assets/build_info_${safe_name}_$n.txt"
-              fi
-              echo "  ⚠️ Could not parse model from: $dir_name; fallback -> $(basename "$dest")"
+              }
+              echo "  ⚠️ Info (fallback): $safe_name"
               cp -- "$info" "$dest"
               ((skipped_count++))
             fi
@@ -682,28 +626,13 @@ jobs:
           
           echo "::endgroup::"
           
-          echo ""
-          echo "Release assets summary:"
           ls -lh ./release-assets/ || echo "No files in release-assets/"
           
-          if [ "$zip_count" -eq 0 ]; then
-            echo "::error::No kernel ZIPs found!"
-            echo "Available files:"
-            find ./all-artifacts -type f | head -50
-            exit 1
-          fi
+          [ "$zip_count" -eq 0 ] && { echo "::error::No ZIPs found!"; exit 1; }
           
           total_info=$((info_count + skipped_count))
-          if [ "$total_info" -eq 0 ]; then
-            echo "::warning::No build_info files were processed!"
-            if [ "$zip_count" -gt 0 ]; then
-              echo "::warning::Found ZIPs but no build_info files matched alongside them."
-            fi
-          elif [ "$skipped_count" -gt 0 ]; then
-            echo "⚠️ Organized $zip_count kernel ZIP(s) and $total_info build info file(s) ($skipped_count with fallback names)"
-          else
-            echo "✅ Organized $zip_count kernel ZIP(s) and $info_count build info file(s)"
-          fi
+          [ "$total_info" -eq 0 ] && echo "::warning::No build_info files processed"
+          [ "$skipped_count" -gt 0 ] && echo "⚠️ Organized $zip_count ZIP(s), $total_info info file(s) ($skipped_count fallback)" || echo "✅ Organized $zip_count ZIP(s), $info_count info file(s)"
 
       - name: Generate Release Notes
         shell: bash
@@ -723,7 +652,6 @@ jobs:
           |--------|--------|---------|--------|-------|--------|
           EOF
           
-          # Process each build_info.txt
           device_count=0
           while IFS= read -r -d '' info; do
             model=$(basename "$info" | sed 's/build_info_\(.*\)\.txt/\1/')
@@ -733,7 +661,6 @@ jobs:
             sukisu_ver=$(grep "^SukiSU Version:" "$info" 2>/dev/null | cut -d: -f2- | xargs || echo "?")
             susfs_ver=$(grep "^SUSFS Version:" "$info" 2>/dev/null | cut -d: -f2- | xargs || echo "?")
             
-            # Find corresponding ZIP and verify SUSFS module
             zip_file=$(find ./release-assets -name "*${model}*.zip" -type f 2>/dev/null | head -1)
             
             if [ -n "$zip_file" ] && [ -f "$zip_file" ] && command -v unzip >/dev/null 2>&1 && unzip -l "$zip_file" 2>/dev/null | grep -q "ksu_module_susfs"; then
@@ -748,9 +675,7 @@ jobs:
             ((device_count++))
           done < <(find ./release-assets -name "build_info_*.txt" -type f -print0 | sort -z)
           
-          if [ "$device_count" -eq 0 ]; then
-            echo "| *No builds completed* | - | - | - | - | ❌ |" >> notes.md
-          fi
+          [ "$device_count" -eq 0 ] && echo "| *No builds completed* | - | - | - | - | ❌ |" >> notes.md
           
           cat << 'EOF' >> notes.md
 
@@ -774,15 +699,15 @@ jobs:
           - ✅ All necessary tools and scripts
           
           ## 📥 Installation
-          1. **Download** the ZIP or AK3 file for your device. If ZIP unzip to get the AK3 zip file          
-          2. **Flash** via Kernel Flasher / SukiSU Ultra Manager (to enable KPM)
-          3. **Reboot** to system
+          1. Download the ZIP or AK3 file for your device. If ZIP, unzip to get the AK3 zip file
+          2. Flash via Kernel Flasher / SukiSU Ultra Manager (to enable KPM)
+          3. Reboot to system
                     
           ## ⚙️ Build Configuration
-          - **Hook:** `${{ inputs.hook }}`
-          - **LSM:** `${{ inputs.lsm }}`
-          - **ZRAM:** `${{ inputs.enable_zram }}`
-          - **Optimization:** `${{ inputs.optimize_level }}`
+          - Hook: `${{ inputs.hook }}`
+          - LSM: `${{ inputs.lsm }}`
+          - ZRAM: `${{ inputs.enable_zram }}`
+          - Optimization: `${{ inputs.optimize_level }}`
           
           ## 🔍 Verification
           After flashing, verify SUSFS is active:
@@ -803,7 +728,6 @@ jobs:
           **Workflow:** ${{ github.workflow }}
           EOF
           
-          # Ensure trailing newline
           printf '\n' >> notes.md
           
           echo "Generated release notes for $device_count device(s)"
@@ -819,32 +743,20 @@ jobs:
           
           echo "::group::Preparing release"
           
-          # Determine prerelease flag
-          if [ "${{ env.IS_PRERELEASE }}" = "true" ]; then
-            PRERELEASE_FLAG="--prerelease"
-            echo "Creating as prerelease"
-          else
-            PRERELEASE_FLAG="--latest"
-            echo "Creating as latest stable release"
-          fi
+          [ "${{ env.IS_PRERELEASE }}" = "true" ] && PRERELEASE_FLAG="--prerelease" || PRERELEASE_FLAG="--latest"
           
-          # Collect all assets (ZIPs and build info files)
           ASSETS=()
           while IFS= read -r -d '' file; do
             ASSETS+=("$file")
           done < <(find ./release-assets -type f \( -name "*.zip" -o -name "build_info_*.txt" \) -print0 | sort -z)
           
-          if [ ${#ASSETS[@]} -eq 0 ]; then
-            echo "::error::No assets found to upload!"
-            exit 1
-          fi
+          [ ${#ASSETS[@]} -eq 0 ] && { echo "::error::No assets found!"; exit 1; }
           
-          echo "Found ${#ASSETS[@]} asset(s) to upload:"
+          echo "Found ${#ASSETS[@]} asset(s)"
           printf '  - %s\n' "${ASSETS[@]}"
           
           echo "::endgroup::"
           
-          # Create release with retries and jitter backoff
           for attempt in 1 2 3; do
             echo "::group::Attempt $attempt/3: Creating release ${{ env.NEW_TAG }}"
             
@@ -864,11 +776,11 @@ jobs:
             echo "::endgroup::"
             echo "⚠️ Attempt $attempt failed"
             
-            if [ $attempt -lt 3 ]; then
+            [ $attempt -lt 3 ] && {
               sleep_time=$(( (RANDOM % (attempt * 5)) + attempt * 3 ))
               echo "Retrying in ${sleep_time}s..."
               sleep $sleep_time
-            fi
+            }
           done
           
           echo "::error::Failed to create release after 3 attempts"
@@ -882,32 +794,21 @@ jobs:
           
           echo "::group::Verifying release ${{ env.NEW_TAG }}"
           
-          # Wait for GitHub API to process
           sleep 3
           
-          # Get release info
           RELEASE_INFO=$(gh release view "${{ env.NEW_TAG }}" \
             --repo "${{ github.repository }}" \
             --json tagName,name,url,assets,isDraft,isPrerelease,createdAt)
           
           ASSET_COUNT=$(echo "$RELEASE_INFO" | jq '.assets | length')
-          IS_DRAFT=$(echo "$RELEASE_INFO" | jq -r '.isDraft')
-          IS_PRERELEASE=$(echo "$RELEASE_INFO" | jq -r '.isPrerelease')
           RELEASE_URL=$(echo "$RELEASE_INFO" | jq -r '.url')
-          CREATED_AT=$(echo "$RELEASE_INFO" | jq -r '.createdAt')
           
           echo "Release Details:"
           echo "  Tag: ${{ env.NEW_TAG }}"
           echo "  URL: $RELEASE_URL"
           echo "  Assets: $ASSET_COUNT"
-          echo "  Draft: $IS_DRAFT"
-          echo "  Prerelease: $IS_PRERELEASE"
-          echo "  Created: $CREATED_AT"
           
-          if [ "$ASSET_COUNT" -eq 0 ]; then
-            echo "::error::No assets found in release!"
-            exit 1
-          fi
+          [ "$ASSET_COUNT" -eq 0 ] && { echo "::error::No assets in release!"; exit 1; }
           
           echo ""
           echo "Uploaded Assets:"
@@ -942,16 +843,11 @@ jobs:
           else
             find ./release-assets -name "*.zip" -type f 2>/dev/null | sort | while read -r f; do
               filename=$(basename "$f")
-              size_bytes=$(stat -c%s "$f" 2>/dev/null || echo "0")
-              size_mb=$((size_bytes / 1048576))
+              size_mb=$(($(stat -c%s "$f" 2>/dev/null || echo "0") / 1048576))
               
-              if command -v unzip >/dev/null 2>&1 && unzip -l "$f" 2>/dev/null | grep -q "ksu_module_susfs"; then
-                status_icon="✅"
-              else
-                status_icon="⚠️"
-              fi
+              command -v unzip >/dev/null 2>&1 && unzip -l "$f" 2>/dev/null | grep -q "ksu_module_susfs" && icon="✅" || icon="⚠️"
               
-              echo "- $status_icon \`$filename\` (${size_mb}MB)" >> $GITHUB_STEP_SUMMARY
+              echo "- $icon \`$filename\` (${size_mb}MB)" >> $GITHUB_STEP_SUMMARY
             done || echo "- No assets found" >> $GITHUB_STEP_SUMMARY
           fi
           
