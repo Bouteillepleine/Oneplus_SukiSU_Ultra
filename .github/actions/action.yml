@@ -1076,96 +1076,40 @@ runs:
         echo "::endgroup::"
 
     - name: Save Build Metadata
-      id: save_metadata
       shell: bash
+      working-directory: ${{ env.CONFIG }}
       run: |
         set -euo pipefail
-        CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
-        ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
-        mkdir -p "$ARTIFACTS_DIR"
         
-        # Get kernel version with proper fallback
-        KERNEL_VERSION="unknown"
-        if [ -n "${KERNEL_FULL_VER:-}" ]; then
-          KERNEL_VERSION="$KERNEL_FULL_VER"
-        else
-          echo "::warning::KERNEL_FULL_VER not set, attempting to detect..."
-          COMMON_DIR="$CONFIG_DIR/kernel_platform/common"
-          if [ -f "$COMMON_DIR/Makefile" ]; then
-            VERSION=$(grep '^VERSION *=' "$COMMON_DIR/Makefile" | awk '{print $3}' | tr -d '[:space:]')
-            PATCHLEVEL=$(grep '^PATCHLEVEL *=' "$COMMON_DIR/Makefile" | awk '{print $3}' | tr -d '[:space:]')
-            SUBLEVEL=$(grep '^SUBLEVEL *=' "$COMMON_DIR/Makefile" | awk '{print $3}' | tr -d '[:space:]')
-            if [ -n "$VERSION" ] && [ -n "$PATCHLEVEL" ] && [ -n "$SUBLEVEL" ]; then
-              KERNEL_VERSION="${ANDROID_VER:-unknown}-$VERSION.$PATCHLEVEL.$SUBLEVEL"
-            fi
-          fi
-        fi
+        mkdir -p artifacts
         
-        # Get SukiSU version
-        SUKISU_VERSION="unknown"
-        if [ -n "${SUKISUVER:-}" ]; then
-          SUKISU_VERSION="$SUKISUVER"
-        fi
+        # Use finalized values from environment
+        KERNEL_VER="${FINAL_KERNEL_VERSION:-${KERNEL_FULL_VER:-unknown}}"
+        SUKISU_VER="${FINAL_SUKISU_VERSION:-${SUKISUVER:-unknown}}"
+        SUSFS_VER="${FINAL_SUSFS_VERSION:-${SUSVER:-unknown}}"
+        ANDROID_VER="${ANDROID_VER:-unknown}"
+        WARNINGS="${WARNINGS_COUNT:-0}"
+        IMAGE_SHA="${IMAGE_SHA256:-unknown}"
+        ZIP_SHA="${ZIP_SHA256:-unknown}"
         
-        # Get SUSFS version
-        SUSFS_VERSION="unknown"
-        if [ -n "${SUSVER:-}" ]; then
-          SUSFS_VERSION="$SUSVER"
-        elif [ -n "${SUSFS_VERSION:-}" ]; then
-          SUSFS_VERSION="$SUSFS_VERSION"
-        else
-          echo "::warning::SUSFS version not set, attempting to detect..."
-          SUSFS_HEADER="$GITHUB_WORKSPACE/susfs4ksu/kernel_patches/include/linux/susfs.h"
-          if [ -f "$SUSFS_HEADER" ]; then
-            DETECTED_VER=$(grep '#define SUSFS_VERSION' "$SUSFS_HEADER" | awk -F'"' '{print $2}' | tr -d '[:space:]')
-            if [ -n "$DETECTED_VER" ]; then
-              SUSFS_VERSION="$DETECTED_VER"
-            fi
-          fi
-        fi
-        
-        # Sanitize all values
-        KERNEL_VERSION=$(echo "$KERNEL_VERSION" | tr -d '\n\r' | head -c 100)
-        SUKISU_VERSION=$(echo "$SUKISU_VERSION" | tr -d '\n\r' | head -c 50)
-        SUSFS_VERSION=$(echo "$SUSFS_VERSION" | tr -d '\n\r' | head -c 50)
-        
-        # Ensure non-empty
-        [ -z "$KERNEL_VERSION" ] && KERNEL_VERSION="unknown"
-        [ -z "$SUKISU_VERSION" ] && SUKISU_VERSION="unknown"
-        [ -z "$SUSFS_VERSION" ] && SUSFS_VERSION="unknown"
-        
-        # Validate no special characters that could break parsing
-        if [[ "$KERNEL_VERSION" =~ [[:cntrl:]] ]]; then
-          echo "::error::Kernel version contains control characters"
-          exit 1
-        fi
-        
-        # Write to outputs using printf
-        {
-          printf "kernel_version=%s\n" "$KERNEL_VERSION"
-          printf "sukisu_version=%s\n" "$SUKISU_VERSION"
-          printf "susfs_version=%s\n" "$SUSFS_VERSION"
-        } >> "$GITHUB_OUTPUT"
-        
-        # Write to environment using printf
-        {
-          printf "FINAL_KERNEL_VERSION=%s\n" "$KERNEL_VERSION"
-          printf "FINAL_SUKISU_VERSION=%s\n" "$SUKISU_VERSION"
-          printf "FINAL_SUSFS_VERSION=%s\n" "$SUSFS_VERSION"
-        } >> "$GITHUB_ENV"
-        
-        # Save to file for artifact
-        cat > "$ARTIFACTS_DIR/build_info.txt" << EOF
-        Kernel Version: ${KERNEL_VERSION}
-        SukiSU Version: ${SUKISU_VERSION}
-        SUSFS Version: ${SUSFS_VERSION}
+        cat > artifacts/build_info.txt << EOF
         Build Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+        Kernel Version: ${KERNEL_VER}
+        Android Version: ${ANDROID_VER}
+        Kernel Base: ${KERNEL_VER}
+        SukiSU Version: ${SUKISU_VER}
+        SUSFS Version: ${SUSFS_VER}
+        Hook Type: ${{ inputs.hook }}
+        LSM Enabled: ${{ inputs.lsm }}
+        ZRAM Enabled: ${{ inputs.enable_zram }}
+        Optimization: ${{ inputs.optimize_level }}
+        Build Warnings: ${WARNINGS}
+        Image SHA256: ${IMAGE_SHA}
+        ZIP SHA256: ${ZIP_SHA}
         EOF
         
-        echo "✅ Metadata saved:"
-        echo "   - Kernel: ${KERNEL_VERSION}"
-        echo "   - SukiSU: ${SUKISU_VERSION}"
-        echo "   - SUSFS: ${SUSFS_VERSION}"
+        echo "✅ Build metadata saved"
+        cat artifacts/build_info.txt
 
     - name: Collect Build Stats / Validate Image
       id: collect_stats
@@ -1855,6 +1799,36 @@ runs:
         echo "============================================"
         
         echo "::endgroup::"
+
+    - name: Save Final Metadata
+      id: save_metadata
+      shell: bash
+      run: |
+        set -euo pipefail
+        
+        # Use sanitized values from environment
+        KERNEL_VER="${KERNEL_FULL_VER:-unknown}"
+        SUKISU_VER="${SUKISUVER:-unknown}"
+        SUSFS_VER="${SUSVER:-unknown}"
+        
+        # Write to outputs
+        {
+          printf "kernel_version=%s\n" "$KERNEL_VER"
+          printf "sukisu_version=%s\n" "$SUKISU_VER"
+          printf "susfs_version=%s\n" "$SUSFS_VER"
+        } >> "$GITHUB_OUTPUT"
+        
+        # Also write to env for build_info.txt
+        {
+          printf "FINAL_KERNEL_VERSION=%s\n" "$KERNEL_VER"
+          printf "FINAL_SUKISU_VERSION=%s\n" "$SUKISU_VER"
+          printf "FINAL_SUSFS_VERSION=%s\n" "$SUSFS_VER"
+        } >> "$GITHUB_ENV"
+        
+        echo "✅ Metadata outputs set:"
+        echo "   Kernel: $KERNEL_VER"
+        echo "   SukiSU: $SUKISU_VER"
+        echo "   SUSFS: $SUSFS_VER"
 
     - name: Upload ZRAM Module (if enabled)
       if: ${{ inputs.enable_zram == 'true' && steps.zram_find.outputs.upload == 'true' }}
