@@ -451,88 +451,161 @@ jobs:
             echo "🎯 Detected as stable release"
           fi
 
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: ./all-artifacts
-
       - name: Organize Assets
         shell: bash
         run: |
           set -euo pipefail
+          set -x
           
           echo "::group::Organizing artifacts"
+          
+          # Validate artifact directory exists
+          if [ ! -d ./all-artifacts ]; then
+            echo "::error::./all-artifacts directory not found"
+            echo "Current directory contents:"
+            ls -la
+            exit 1
+          fi
+          
+          # Sanity check: ensure release-assets is a directory
+          if [ -e ./release-assets ] && [ ! -d ./release-assets ]; then
+            echo "::warning::release-assets exists but is not a directory, removing..."
+            rm -f ./release-assets
+          fi
           mkdir -p ./release-assets
           
-          # Copy kernel ZIPs
+          # Debug: Show artifact structure with count (pipefail-safe)
+          echo "Artifact directory structure (first 50):"
+          (set -o pipefail; LC_ALL=C find ./all-artifacts \( -type f -name "*.zip" -o -type f -name "build_info.txt" \) \
+            | tee >(wc -l >&2) | head -50)
+          echo ""
+          
+          # Copy kernel ZIPs with duplicate protection
           zip_count=0
           while IFS= read -r -d '' zip; do
-            filename=$(basename "$zip")
-            echo "  Found ZIP: $filename"
-            cp "$zip" "./release-assets/$filename"
+            if [ ! -f "$zip" ]; then
+              echo "::warning::Matched as zip but not a regular file: $zip"
+              continue
+            fi
+            filename=$(basename -- "$zip")
+            dest="./release-assets/$filename"
+            
+            # Handle duplicate filenames from different subdirectories
+            if [ -e "$dest" ]; then
+              n=2
+              base="${filename%.*}"
+              ext="${filename##*.}"
+              if [ "$ext" != "$filename" ]; then
+                # Has extension
+                while [ -e "./release-assets/${base}_$n.$ext" ]; do n=$((n+1)); done
+                dest="./release-assets/${base}_$n.$ext"
+                echo "  Found ZIP (duplicate, renamed): $filename -> $(basename "$dest")"
+              else
+                # No extension
+                while [ -e "./release-assets/${filename}_$n" ]; do n=$((n+1)); done
+                dest="./release-assets/${filename}_$n"
+                echo "  Found ZIP (duplicate, renamed): $filename -> $(basename "$dest")"
+              fi
+            else
+              echo "  Found ZIP: $filename"
+            fi
+            
+            cp -- "$zip" "$dest"
             ((zip_count++))
-          done < <(find ./all-artifacts -name "*.zip" -type f -print0 | sort -z)
+          done < <(LC_ALL=C find ./all-artifacts -type f -name "*.zip" -print0 | LC_ALL=C sort -z)
           
           # Copy build info files with model-specific naming
           info_count=0
           skipped_count=0
-          
           while IFS= read -r -d '' info; do
-            # Get artifact directory name
-            artifact_dir=$(dirname "$info")
-            dir_name=$(basename "$artifact_dir")
+            # Warn if build_info file is empty
+            if [ ! -s "$info" ]; then
+              echo "::warning::Empty build_info file: $info"
+              continue
+            fi
             
-            # Try to extract model using multiple patterns
+            # Normalize CRLF to LF if dos2unix is available
+            if command -v dos2unix >/dev/null 2>&1; then
+              dos2unix -q "$info" 2>/dev/null || true
+            fi
+            
+            artifact_dir=$(dirname -- "$info")
+            dir_name=$(basename -- "$artifact_dir")
+            echo "  Processing: $dir_name"
+            
             model=""
-            
-            # Pattern 1: kernel-{MODEL}-android{VERSION}-{KERNEL}
-            if [[ "$dir_name" =~ ^kernel-(.+)-android[0-9]+-[0-9.]+$ ]]; then
+            if [[ "$dir_name" =~ ^kernel-(.+)-android([0-9]+)-([0-9.]+)$ ]]; then
               model="${BASH_REMATCH[1]}"
-            # Pattern 2: kernel-{MODEL}-android{VERSION} (no kernel version)
-            elif [[ "$dir_name" =~ ^kernel-(.+)-android[0-9]+$ ]]; then
+              echo "    Matched Pattern 1: model=$model"
+            elif [[ "$dir_name" =~ ^kernel-(.+)-android([0-9]+)$ ]]; then
               model="${BASH_REMATCH[1]}"
-            # Pattern 3: kernel-{MODEL} (minimal)
+              echo "    Matched Pattern 2: model=$model"
             elif [[ "$dir_name" =~ ^kernel-(.+)$ ]]; then
               model="${BASH_REMATCH[1]}"
+              echo "    Matched Pattern 3: model=$model"
+            fi
+            
+            # Fallback: read Model: from file if not parsed (locale-safe)
+            if [ -z "$model" ]; then
+              LC_ALL=C model=$(grep -m1 '^Model:' "$info" | cut -d: -f2- | xargs || true)
+              if [ -n "$model" ]; then
+                echo "    Fallback Model from file: $model"
+              fi
             fi
             
             if [ -n "$model" ]; then
-              # Sanitize model name (remove any remaining slashes or special chars)
-              model=$(echo "$model" | tr '/' '_' | tr -cd 'A-Za-z0-9_-')
-              
-              echo "  ✅ Found build info: $model (from: $dir_name)"
-              cp "$info" "./release-assets/build_info_${model}.txt"
+              # Normalize: collapse whitespace, remove slashes, keep only safe chars
+              # Expand allowed set if Unicode/punctuation needed: tr -cd 'A-Za-z0-9_-'
+              model=$(echo "$model" | tr -s '[:space:]' ' ' | sed 's/[[:space:]]\+/_/g' | tr '/' '_' | tr -cd 'A-Za-z0-9_-')
+              dest="./release-assets/build_info_${model}.txt"
+              # Avoid overwriting if multiple artifacts share model
+              if [ -e "$dest" ]; then
+                n=2
+                while [ -e "./release-assets/build_info_${model}_$n.txt" ]; do n=$((n+1)); done
+                dest="./release-assets/build_info_${model}_$n.txt"
+              fi
+              echo "  ✅ Found build info: $model (from: $dir_name) -> $(basename "$dest")"
+              cp -- "$info" "$dest"
               ((info_count++))
             else
-              echo "  ⚠️ Could not parse model from: $dir_name"
-              
-              # Fallback: use directory name directly
-              safe_name=$(echo "$dir_name" | tr '/' '_' | tr -cd 'A-Za-z0-9_-')
-              echo "  📝 Using fallback name: $safe_name"
-              cp "$info" "./release-assets/build_info_${safe_name}.txt"
+              safe_name=$(echo "$dir_name" | tr -s '[:space:]' ' ' | sed 's/[[:space:]]\+/_/g' | tr '/' '_' | tr -cd 'A-Za-z0-9_-')
+              dest="./release-assets/build_info_${safe_name}.txt"
+              if [ -e "$dest" ]; then
+                n=2
+                while [ -e "./release-assets/build_info_${safe_name}_$n.txt" ]; do n=$((n+1)); done
+                dest="./release-assets/build_info_${safe_name}_$n.txt"
+              fi
+              echo "  ⚠️ Could not parse model from: $dir_name; fallback -> $(basename "$dest")"
+              cp -- "$info" "$dest"
               ((skipped_count++))
             fi
-          done < <(find ./all-artifacts -name "build_info.txt" -type f -print0 | sort -z)
+          done < <(LC_ALL=C find ./all-artifacts -type f -name "build_info.txt" -print0 | LC_ALL=C sort -z)
           
           echo "::endgroup::"
           
           echo ""
           echo "Release assets summary:"
-          ls -lh ./release-assets/
+          ls -lh ./release-assets/ || echo "No files in release-assets/"
           
           if [ "$zip_count" -eq 0 ]; then
             echo "::error::No kernel ZIPs found!"
+            echo "Available files:"
+            find ./all-artifacts -type f | head -50
             exit 1
           fi
           
           total_info=$((info_count + skipped_count))
           if [ "$total_info" -eq 0 ]; then
-            echo "::warning::No build info files were processed!"
+            echo "::warning::No build_info files were processed!"
+            if [ "$zip_count" -gt 0 ]; then
+              echo "::warning::Found ZIPs but no build_info files matched alongside them."
+            fi
           elif [ "$skipped_count" -gt 0 ]; then
             echo "⚠️ Organized $zip_count kernel ZIP(s) and $total_info build info file(s) ($skipped_count with fallback names)"
           else
             echo "✅ Organized $zip_count kernel ZIP(s) and $info_count build info file(s)"
           fi
+
 
       - name: Generate Release Notes
         shell: bash
