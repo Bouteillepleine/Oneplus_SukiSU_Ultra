@@ -808,34 +808,31 @@ jobs:
           
           echo "::group::Organizing artifacts"
           
-          # Ensure directory exists (defensive, already validated above)
           mkdir -p ./all-artifacts
           
-          # Double-check for files with prune optimization
           if ! find ./all-artifacts -maxdepth 10 -type f \( -name "*.zip" -o -name "build_info.txt" \) -print -quit | grep -q .; then
             echo "::error::No artifacts found under ./all-artifacts"
-            echo ""
-            echo "This should not happen as we validated earlier, but the directory is empty."
-            echo ""
-            echo "Directory contents:"
-            ls -laR ./all-artifacts 2>/dev/null || echo "  (empty or doesn't exist)"
             exit 1
           fi
           
-          # Sanity check: ensure release-assets is a directory
           if [ -e ./release-assets ] && [ ! -d ./release-assets ]; then
             echo "::warning::release-assets exists but is not a directory, removing..."
             rm -f ./release-assets
           fi
           mkdir -p ./release-assets
           
-          # Debug: Show artifact structure with count
           file_count=$(find ./all-artifacts -type f \( -name "*.zip" -o -name "build_info.txt" \) 2>/dev/null | wc -l | tr -d '[:space:]')
           echo "Total files to process: $file_count"
           echo ""
           
-          # Copy kernel ZIPs with duplicate protection
+          # ============================================
+          # INITIALIZE COUNTERS (CRITICAL FIX)
+          # ============================================
           zip_count=0
+          info_count=0
+          skipped_count=0
+          
+          # Copy kernel ZIPs
           while IFS= read -r -d '' zip; do
             if [ ! -f "$zip" ]; then
               echo "::warning::Matched as zip but not a regular file: $zip"
@@ -844,7 +841,6 @@ jobs:
             filename=$(basename -- "$zip")
             dest="./release-assets/$filename"
             
-            # Handle duplicate filenames from different subdirectories
             if [ -e "$dest" ]; then
               n=2
               base="${filename%.*}"
@@ -866,24 +862,19 @@ jobs:
             ((zip_count++))
           done < <(LC_ALL=C find ./all-artifacts -type f -name "*.zip" -print0 2>/dev/null | LC_ALL=C sort -z)
           
-          # Copy build info files with model-specific naming
-          info_count=0
-          skipped_count=0
+          # Copy build info files
           while IFS= read -r -d '' info; do
-            # Warn if build_info file is empty
             if [ ! -s "$info" ]; then
               echo "::warning::Empty build_info file: $info"
               continue
             fi
             
-            # Normalize CRLF to LF
             dos2unix -q "$info" 2>/dev/null || true
             
             artifact_dir=$(dirname -- "$info")
             dir_name=$(basename -- "$artifact_dir")
             
             model=""
-            # Try to extract model from artifact directory name
             if [[ "$dir_name" =~ ^kernel-(.+)-android([0-9]+)-([0-9.]+)$ ]]; then
               model="${BASH_REMATCH[1]}"
             elif [[ "$dir_name" =~ ^kernel-(.+)-android([0-9]+)$ ]]; then
@@ -892,16 +883,13 @@ jobs:
               model="${BASH_REMATCH[1]}"
             fi
             
-            # Fallback: read Model: from file if not parsed
             if [ -z "$model" ]; then
               LC_ALL=C model=$(grep -m1 '^Model:' "$info" 2>/dev/null | cut -d: -f2- | xargs || true)
             fi
             
             if [ -n "$model" ]; then
-              # Normalize: collapse whitespace, remove slashes, keep only safe chars
               model=$(echo "$model" | tr -s '[:space:]' ' ' | sed 's/[[:space:]]\+/_/g' | tr '/' '_' | tr -cd 'A-Za-z0-9_.-')
               dest="./release-assets/build_info_${model}.txt"
-              # Avoid overwriting if multiple artifacts share model
               if [ -e "$dest" ]; then
                 n=2
                 while [ -e "./release-assets/build_info_${model}_$n.txt" ]; do n=$((n+1)); done
@@ -932,20 +920,12 @@ jobs:
           
           if [ "$zip_count" -eq 0 ]; then
             echo "::error::No kernel ZIPs found after organizing!"
-            echo ""
-            echo "Available files in artifacts:"
-            find ./all-artifacts -type f 2>/dev/null | head -50
-            echo ""
-            echo "This indicates the build job produced artifacts but they don't match the expected pattern (*.zip)"
             exit 1
           fi
           
           total_info=$((info_count + skipped_count))
           if [ "$total_info" -eq 0 ]; then
             echo "::warning::No build_info files were processed!"
-            if [ "$zip_count" -gt 0 ]; then
-              echo "::notice::Found $zip_count ZIP(s) but no build_info files - release notes will be limited"
-            fi
           elif [ "$skipped_count" -gt 0 ]; then
             echo "⚠️ Organized $zip_count kernel ZIP(s) and $total_info build info file(s) ($skipped_count with fallback names)"
           else
@@ -979,7 +959,6 @@ jobs:
             sukisu_ver=$(grep "^SukiSU Version:" "$info" 2>/dev/null | cut -d: -f2- | xargs || echo "?")
             susfs_ver=$(grep "^SUSFS Version:" "$info" 2>/dev/null | cut -d: -f2- | xargs || echo "?")
             
-            # Find matching ZIP with sanitized model name
             zip_file=$(find ./release-assets -type f -name "*${model}*.zip" 2>/dev/null | head -1)
             
             if [ -n "$zip_file" ] && [ -f "$zip_file" ] && unzip -l "$zip_file" 2>/dev/null | grep -q "ksu_module_susfs"; then
@@ -1080,8 +1059,6 @@ jobs:
           
           if [ ${#ASSETS[@]} -eq 0 ]; then
             echo "::error::No assets found to upload!"
-            echo "This should not happen as the Organize Assets step validated ZIPs exist."
-            ls -la ./release-assets/ || true
             exit 1
           fi
           
@@ -1156,7 +1133,6 @@ jobs:
           
           if [ "$ZIPS" -eq 0 ]; then
             echo "::error::Release has no .zip assets!"
-            echo "This is critical - users need kernel ZIPs to flash"
             exit 1
           fi
           
