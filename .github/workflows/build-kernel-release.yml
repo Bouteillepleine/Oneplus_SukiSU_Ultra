@@ -127,10 +127,8 @@ jobs:
           if [[ "$input" == "ALL" ]]; then
             echo "Building all models"
           elif [[ "$input" == android*-* ]]; then
-            # Split android version and kernel version
-            # Format: android15-6.6 or android14-5.15
-            av="${input%%-*}"  # Everything before first hyphen
-            kv="${input#*-}"   # Everything after first hyphen
+            av="${input%%-*}"
+            kv="${input#*-}"
             
             if [ -z "$av" ] || [ -z "$kv" ]; then
               echo "::error::Invalid android-kernel format: $input"
@@ -154,9 +152,8 @@ jobs:
             exit 1
           fi
           
-          # Check matrix size limit (GitHub Actions max: 256)
           if [ "$count" -gt 256 ]; then
-            echo "::error::Too many configurations ($count > 256). Please use a more specific filter."
+            echo "::error::Too many configurations ($count > 256)"
             exit 1
           fi
           
@@ -212,6 +209,7 @@ jobs:
           restore-keys: |
             ccache-${{ matrix.model }}-${{ matrix.kernel_version }}-
             ccache-${{ matrix.model }}-
+          save-always: false
 
       - name: Setup Prebuilts Cache
         uses: actions/cache@v4
@@ -223,6 +221,7 @@ jobs:
           restore-keys: |
             prebuilts-${{ matrix.model }}-${{ matrix.kernel_version }}-
             prebuilts-${{ matrix.model }}-
+          save-always: false
 
       - name: Build Kernel
         id: build
@@ -290,13 +289,49 @@ jobs:
           compression-level: 0
           if-no-files-found: error
 
+      # ============================================
+      # FIX: Prepare cache directories before cleanup
+      # ============================================
+      - name: Prepare Cache Directories
+        if: always()
+        shell: bash
+        run: |
+          echo "::group::Prepare cache directories"
+          
+          # Ensure ccache directory exists
+          mkdir -p ~/.ccache
+          
+          # Ensure prebuilts directories exist (even if empty)
+          if [ -d "${{ matrix.model }}" ]; then
+            mkdir -p "${{ matrix.model }}/kernel_platform/prebuilts"
+            mkdir -p "${{ matrix.model }}/kernel_platform/prebuilts-master"
+          fi
+          
+          # Show cache sizes
+          echo "Cache directory sizes:"
+          du -sh ~/.ccache 2>/dev/null || echo "  ~/.ccache: empty"
+          du -sh "${{ matrix.model }}/kernel_platform/prebuilts" 2>/dev/null || echo "  prebuilts: empty"
+          du -sh "${{ matrix.model }}/kernel_platform/prebuilts-master" 2>/dev/null || echo "  prebuilts-master: empty"
+          
+          echo "::endgroup::"
+
       - name: Cleanup on Cancel
         if: cancelled()
         shell: bash
         run: |
           echo "::warning::Build cancelled for ${{ matrix.model }}"
-          rm -rf "${{ matrix.model }}/artifacts" "${{ matrix.model }}/kernel_platform" "${{ matrix.model }}/out" "${{ matrix.model }}/downloads" || true
-          echo "✅ Cleanup completed"
+          
+          # Clean artifacts and build outputs (preserve cache dirs)
+          rm -rf "${{ matrix.model }}/artifacts" "${{ matrix.model }}/out" "${{ matrix.model }}/downloads" || true
+          
+          # Clean kernel_platform but preserve prebuilts
+          if [ -d "${{ matrix.model }}/kernel_platform" ]; then
+            find "${{ matrix.model }}/kernel_platform" -mindepth 1 -maxdepth 1 \
+              ! -name "prebuilts" ! -name "prebuilts-master" \
+              -exec rm -rf {} + 2>/dev/null || true
+          fi
+          
+          echo "✅ Cleanup completed (cache preserved)"
 
   release:
     needs: build
@@ -330,7 +365,6 @@ jobs:
             NEW_TAG="${BASE_VERSION}-r0"
             echo "No existing tags found, starting with: $NEW_TAG"
           else
-            # Extract revision number
             REV=$(echo "$LATEST" | sed -n 's/.*-r\([0-9]\+\)$/\1/p')
             if [ -z "$REV" ]; then
               echo "::error::Failed to parse revision from: $LATEST"
@@ -401,20 +435,17 @@ jobs:
           |--------|--------|---------|--------|-------|--------|
           EOF
           
-          # Process each build_info.txt (skip if missing)
+          # Process each build_info.txt
           find ./release-assets -name "build_info_*.txt" -type f 2>/dev/null | sort | while read -r info; do
             model=$(basename "$info" | sed 's/build_info_\(.*\)\.txt/\1/')
             
-            # Read from build_info.txt with fallbacks
             kernel_ver=$(grep "^Kernel Version:" "$info" 2>/dev/null | cut -d: -f2- | xargs || echo "?")
             android_ver=$(grep "^Android Version:" "$info" 2>/dev/null | cut -d: -f2- | xargs || echo "?")
             sukisu_ver=$(grep "^SukiSU Version:" "$info" 2>/dev/null | cut -d: -f2- | xargs || echo "?")
             susfs_ver=$(grep "^SUSFS Version:" "$info" 2>/dev/null | cut -d: -f2- | xargs || echo "?")
             
-            # Find corresponding ZIP
             zip_file=$(find ./release-assets -name "*${model}*.zip" -type f 2>/dev/null | head -1)
             
-            # Check SUSFS module presence
             if [ -n "$zip_file" ] && [ -f "$zip_file" ] && unzip -l "$zip_file" 2>/dev/null | grep -q "ksu_module_susfs"; then
               status="✅"
             else
@@ -423,9 +454,8 @@ jobs:
             
             printf "| %-12s | %-18s | %-8s | %-8s | %-8s | %s |\n" \
               "$model" "$kernel_ver" "$android_ver" "$sukisu_ver" "$susfs_ver" "$status" >> notes.md
-          done || true  # Don't fail if no build_info files found
+          done || true
           
-          # If no devices were added, add a note
           if ! grep -q "^| " notes.md; then
             echo "| *No builds completed* | - | - | - | - | ❌ |" >> notes.md
           fi
@@ -437,7 +467,7 @@ jobs:
           - 🛡️ **SUSFS v1.5.2+** (Kernel patches + KSU module included)
           - 🔐 Magic Mount support
           - 🔒 WireGuard VPN support
-          - 🚀 BBR v1 TCP congestion control
+          - 🚀 BBR TCP congestion control
           - 🐛 Ptrace fix for kernels <5.16
           - 🎯 Flexible hook types (Manual/Kprobe/Tracepoint)
           - 💾 ZRAM with advanced compressors (LZ4K, LZ4KD, 842)
@@ -452,9 +482,11 @@ jobs:
           - ✅ All necessary tools and scripts
           
           ## 📥 Installation
-          1. **Download** the ZIP for your device      
-          2. **Flash** the kernel ZIP using SukiSU Manager
-          3. **Reboot** to system      
+          1. **Download** the ZIP for your device
+          2. **Reboot** to recovery (TWRP/OrangeFox recommended)
+          3. **Flash** the ZIP file
+          4. **Reboot** to system
+          5. **Install** SukiSU Manager APK
           
           ## ⚙️ Build Configuration
           - **Hook:** ${{ inputs.hook }}
@@ -463,7 +495,7 @@ jobs:
           - **Optimization:** ${{ inputs.optimize_level }}
           
           ## 🔍 Verification
-          After flashing, you can verify SUSFS is active:
+          After flashing, verify SUSFS is active:
           \`\`\`bash
           su -c "dmesg | grep -i susfs"
           \`\`\`
@@ -485,7 +517,6 @@ jobs:
       - name: Create Release
         shell: bash
         run: |
-          # Determine if this should be a prerelease
           IS_PRERELEASE="false"
           if [[ "${{ env.NEW_TAG }}" =~ (alpha|beta|rc|test) ]]; then
             IS_PRERELEASE="true"
@@ -517,7 +548,6 @@ jobs:
           set -euo pipefail
           
           expected=$(find ./release-assets -name "*.zip" -type f | wc -l)
-          uploaded=0
           
           find ./release-assets -name "*.zip" -type f | sort | while read -r zip; do
             filename=$(basename "$zip")
@@ -526,7 +556,6 @@ jobs:
               if gh release upload "${{ env.NEW_TAG }}" "$zip" \
                  --repo "${{ github.repository }}" --clobber; then
                 echo "✅ $filename"
-                ((uploaded++))
                 break
               fi
               echo "⚠️ Retry $i/3: $filename"
@@ -534,7 +563,7 @@ jobs:
             done
           done
           
-          # Also upload build info files
+          # Upload build info files
           find ./release-assets -name "build_info_*.txt" -type f | while read -r info; do
             gh release upload "${{ env.NEW_TAG }}" "$info" \
               --repo "${{ github.repository }}" --clobber || true
@@ -544,7 +573,7 @@ jobs:
             --repo "${{ github.repository }}" \
             --json assets --jq '.assets | length')
           
-          echo "Expected ZIPs: $expected | Total assets in release: $actual"
+          echo "Expected ZIPs: $expected | Total assets: $actual"
           [ "$actual" -eq 0 ] && { echo "::error::No assets!"; exit 1; }
           echo "✅ Release has $actual asset(s)"
 
@@ -568,7 +597,6 @@ jobs:
             filename=$(basename "$f")
             size=$(stat -c%s "$f" | numfmt --to=iec-i --suffix=B)
             
-            # Check if SUSFS module is present
             if unzip -l "$f" 2>/dev/null | grep -q "ksu_module_susfs"; then
               status_icon="✅"
             else
