@@ -2,6 +2,7 @@ name: Build OnePlus Kernels with SukiSU Ultra
 
 permissions:
   contents: write
+  actions: write
 
 on:
   workflow_dispatch:
@@ -73,10 +74,6 @@ on:
         options: [O2, O3]
         default: O2
 
-concurrency:
-  group: build-${{ github.workflow }}-${{ github.event.inputs.op_model }}
-  cancel-in-progress: true
-
 jobs:
   set-op-model:
     runs-on: ubuntu-latest
@@ -97,17 +94,15 @@ jobs:
           
           [ ! -d "configs" ] && { echo "::error::configs/ not found!"; exit 1; }
           
-          # Stable sorted list of configs
           declare -a models=()
           while IFS= read -r -d '' file; do
             models+=("$(basename "$file" .json)")
-          done < <(find configs/ -name "*.json" -print0 | sort -z)
+          done < <(find configs/ -name "*.json" -print0)
           
           [ ${#models[@]} -eq 0 ] && { echo "::error::No configs found!"; exit 1; }
           
           echo "Found ${#models[@]} config(s)"
           
-          # Build JSON array
           echo "[" > matrix.json
           first=true
           for model in "${models[@]}"; do
@@ -119,80 +114,41 @@ jobs:
           done
           echo "]" >> matrix.json
           
-          # Apply filter based on input
           input="${{ github.event.inputs.op_model }}"
           jq_filter="."
           
           if [[ "$input" == "ALL" ]]; then
-            echo "Building all models"
+            echo "Building all"
           elif [[ "$input" == android*-* ]]; then
-            av="${input%%-*}"
-            kv="${input#*-}"
-            
-            if [ -z "$av" ] || [ -z "$kv" ]; then
-              echo "::error::Invalid android-kernel format: $input"
-              exit 1
-            fi
-            
-            echo "Filtering: Android=$av, Kernel=$kv"
+            IFS='-' read -r av kv <<< "$input"
             jq_filter="map(select(.android_version == \"$av\" and .kernel_version == \"$kv\"))"
           else
-            echo "Filtering: Model=$input"
             jq_filter="map(select(.model == \"$input\"))"
           fi
           
-          # Apply filter
           filtered=$(jq -c "$jq_filter" matrix.json)
-          count=$(echo "$filtered" | jq 'length')
+          [ "$(echo "$filtered" | jq 'length')" -eq 0 ] && { echo "::error::No match: $input"; exit 1; }
           
-          # Validate results
-          if [ "$count" -eq 0 ]; then
-            echo "::error::No configurations match: $input"
-            exit 1
-          fi
-          
-          if [ "$count" -gt 256 ]; then
-            echo "::error::Too many configurations ($count > 256)"
-            exit 1
-          fi
-          
-          echo "Matched $count configuration(s)"
-          
-          # Wrap in include object
           wrapped=$(jq -n --argjson items "$filtered" '{ include: $items }')
           
-          # Output to GitHub
           {
             echo "matrix<<EOF"
             echo "$wrapped"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
           
-          # Generate summary
           {
             echo "### 📱 Build Matrix"
-            echo "**Input:** \`$input\` | **Matched:** $count configuration(s)"
-            echo ""
-            echo "<details>"
-            echo "<summary>View Matrix JSON</summary>"
-            echo ""
+            echo "**Input:** \`$input\` | **Count:** $(echo "$filtered" | jq 'length')"
             echo '```json'
             echo "$wrapped" | jq '.'
             echo '```'
-            echo "</details>"
-            echo ""
-            echo "| # | Model | Android | Kernel |"
-            echo "|---|-------|---------|--------|"
-            
-            echo "$filtered" | jq -r '.[] | "\(.model)|\(.android_version)|\(.kernel_version)"' | \
-            awk -F'|' '{printf "| %d | %s | %s | %s |\n", NR, $1, $2, $3}'
           } >> $GITHUB_STEP_SUMMARY
 
   build:
     name: ${{ matrix.model }}
     needs: set-op-model
     runs-on: ubuntu-latest
-    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.set-op-model.outputs.matrix) }}
@@ -200,29 +156,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Restore Compiler Cache
-        id: cache-ccache-restore
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.ccache
-          key: ccache-${{ matrix.model }}-${{ matrix.kernel_version }}-${{ github.sha }}
-          restore-keys: |
-            ccache-${{ matrix.model }}-${{ matrix.kernel_version }}-
-            ccache-${{ matrix.model }}-
-
-      - name: Restore Prebuilts Cache
-        id: cache-prebuilts-restore
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            ${{ matrix.model }}/kernel_platform/prebuilts
-            ${{ matrix.model }}/kernel_platform/prebuilts-master
-          key: prebuilts-${{ matrix.model }}-${{ matrix.kernel_version }}-${{ hashFiles(format('configs/{0}.json', matrix.model)) }}
-          restore-keys: |
-            prebuilts-${{ matrix.model }}-${{ matrix.kernel_version }}-
-            prebuilts-${{ matrix.model }}-
-
-      - name: Build Kernel
+      - name: Build
         id: build
         uses: ./.github/actions
         with:
@@ -234,27 +168,24 @@ jobs:
           optimize_level: ${{ inputs.optimize_level }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Validate Outputs
+      - name: Validate
         if: always()
         shell: bash
         run: |
           missing=0
-          for out in kernel_version sukisu_version susfs_version image_sha256 warnings_count zip_name zip_size zip_sha256; do
+          for out in kernel_version sukisu_version susfs_version image_sha256 warnings_count zip_name; do
             case "$out" in
               kernel_version) v="${{ steps.build.outputs.kernel_version }}" ;;
               sukisu_version) v="${{ steps.build.outputs.sukisu_version }}" ;;
-              susfs_version) v="${{ steps.build.outputs.susfs_version }}" ;;
-              image_sha256) v="${{ steps.build.outputs.image_sha256 }}" ;;
+              susfs_version) v="${{ steps.build.outputs.susfs_version }}" ;;              
               warnings_count) v="${{ steps.build.outputs.warnings_count }}" ;;
               zip_name) v="${{ steps.build.outputs.zip_name }}" ;;
-              zip_size) v="${{ steps.build.outputs.zip_size }}" ;;
-              zip_sha256) v="${{ steps.build.outputs.zip_sha256 }}" ;;
             esac
-            [ -z "$v" ] && { echo "::error::Missing: $out"; ((missing++)); } || echo "✅ $out"
+            [ -z "$v" ] && { echo "::error::Missing: $out"; ((missing++)); } || echo "✅ $out: $v"
           done
           [ $missing -gt 0 ] && exit 1 || exit 0
 
-      - name: Build Summary
+      - name: Summary
         if: always()
         shell: bash
         run: |
@@ -271,555 +202,146 @@ jobs:
           | SUSFS | ${{ steps.build.outputs.susfs_version }} |
           | Warnings | ${{ steps.build.outputs.warnings_count }} |
           | Package | \`${{ steps.build.outputs.zip_name }}\` |
-          | Size | $(numfmt --to=iec-i --suffix=B ${{ steps.build.outputs.zip_size }} 2>/dev/null || echo "${{ steps.build.outputs.zip_size }}") |
           
           **Config:** Hook=\`${{ inputs.hook }}\` LSM=\`${{ inputs.lsm }}\` ZRAM=\`${{ inputs.enable_zram }}\` Opt=\`${{ inputs.optimize_level }}\`
           EOF
 
-      - name: Cache Statistics
-        if: always()
-        shell: bash
-        run: |
-          export CCACHE_DIR="$HOME/.ccache"
-          
-          if command -v ccache >/dev/null 2>&1 && [ -d "$CCACHE_DIR" ]; then
-            echo "::group::ccache Final Statistics"
-            ccache -s || true
-            echo "::endgroup::"
-            
-            # Extract hit rate
-            HIT_RATE=$(ccache -s 2>/dev/null | grep "cache hit rate" | awk '{print $NF}' || echo "N/A")
-            CACHE_SIZE=$(du -sh "$CCACHE_DIR" 2>/dev/null | awk '{print $1}' || echo "N/A")
-            
-            # Determine cache status
-            if [ "${{ steps.cache-ccache-restore.outputs.cache-hit }}" = "true" ]; then
-              CACHE_STATUS="✅ Exact match"
-            elif [ -n "${{ steps.cache-ccache-restore.outputs.cache-matched-key }}" ]; then
-              CACHE_STATUS="🔄 Partial match"
-            else
-              CACHE_STATUS="❌ Cold start"
-            fi
-            
-            # Safe fallback for restored key
-            RESTORED_KEY="${{ steps.cache-ccache-restore.outputs.cache-matched-key }}"
-            [ -z "$RESTORED_KEY" ] && RESTORED_KEY="none"
-            
-            cat >> $GITHUB_STEP_SUMMARY << EOF
-          
-          ### 📊 Cache Performance
-          - **Status:** $CACHE_STATUS
-          - **Hit Rate:** $HIT_RATE
-          - **Cache Size:** $CACHE_SIZE
-          - **Restored Key:** \`$RESTORED_KEY\`
-          EOF
-          else
-            echo "ccache not available or cache directory not found"
-          fi
-
-      - name: Upload Artifacts
-        if: success()
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
           name: kernel-${{ matrix.model }}-${{ matrix.android_version }}-${{ matrix.kernel_version }}
           path: |
-            ${{ matrix.model }}/artifacts/${{ steps.build.outputs.zip_name }}
-            ${{ matrix.model }}/artifacts/build_info.txt
+            ${{ matrix.model }}/artifacts/*.zip
+            ${{ matrix.model }}/artifacts/*.txt
           retention-days: 7
-          compression-level: 0
           if-no-files-found: error
-
-      - name: Prepare Cache Directories
-        if: always()
-        shell: bash
-        run: |
-          echo "::group::Prepare cache directories"
-          
-          # Ensure ccache directory exists
-          mkdir -p ~/.ccache
-          
-          # Ensure prebuilts directories exist (even if empty)
-          if [ -d "${{ matrix.model }}" ]; then
-            mkdir -p "${{ matrix.model }}/kernel_platform/prebuilts"
-            mkdir -p "${{ matrix.model }}/kernel_platform/prebuilts-master"
-          fi
-          
-          # Show cache sizes
-          echo "Cache directory sizes:"
-          du -sh ~/.ccache 2>/dev/null || echo "  ~/.ccache: empty"
-          du -sh "${{ matrix.model }}/kernel_platform/prebuilts" 2>/dev/null || echo "  prebuilts: empty"
-          du -sh "${{ matrix.model }}/kernel_platform/prebuilts-master" 2>/dev/null || echo "  prebuilts-master: empty"
-          
-          echo "::endgroup::"
-
-      - name: Save Compiler Cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.ccache
-          key: ${{ steps.cache-ccache-restore.outputs.cache-primary-key }}
-
-      - name: Save Prebuilts Cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ${{ matrix.model }}/kernel_platform/prebuilts
-            ${{ matrix.model }}/kernel_platform/prebuilts-master
-          key: ${{ steps.cache-prebuilts-restore.outputs.cache-primary-key }}
-
-      - name: Cleanup on Cancel
-        if: cancelled()
-        shell: bash
-        run: |
-          echo "::warning::Build cancelled for ${{ matrix.model }}"
-          
-          # Clean artifacts and build outputs (preserve cache dirs)
-          rm -rf "${{ matrix.model }}/artifacts" "${{ matrix.model }}/out" "${{ matrix.model }}/downloads" || true
-          
-          # Clean kernel_platform but preserve prebuilts
-          if [ -d "${{ matrix.model }}/kernel_platform" ]; then
-            find "${{ matrix.model }}/kernel_platform" -mindepth 1 -maxdepth 1 \
-              ! -name "prebuilts" ! -name "prebuilts-master" \
-              -exec rm -rf {} + 2>/dev/null || true
-          fi
-          
-          echo "✅ Cleanup completed (cache preserved)"
 
   release:
     needs: build
     runs-on: ubuntu-latest
     if: ${{ inputs.make_release }}
-    permissions:
-      contents: write
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      RELEASE_NAME: 'OnePlus Kernels - SukiSU Ultra & SUSFS v1.5.2+'
+      RELEASE_NAME: '*TEST* OnePlus Kernels - SukiSU Ultra & SUSFS v1.5.12 *TEST*'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Check gh CLI
-        shell: bash
-        run: |
-          gh --version || { 
-            echo "::error::GitHub CLI (gh) not found on runner"
-            exit 1
-          }
           
       - name: Generate Tag
-        shell: bash
         run: |
-          set -euo pipefail
-          
-          BASE_VERSION="v1.5.2"
-          
-          echo "::group::Fetching existing releases"
-          # Get all tags matching our pattern and sort numerically
-          LATEST=$(gh release list \
-            --repo "${{ github.repository }}" \
-            --limit 300 \
-            --json tagName \
-            --jq '[.[] | select(.tagName | startswith("'"$BASE_VERSION"'-r")) | .tagName] | sort_by(split("-r")[1] | tonumber) | .[-1]' \
-            2>/dev/null || echo "")
-          echo "::endgroup::"
+          BASE="v1.5.12-r0"
+          LATEST=$(gh api repos/${{ github.repository }}/tags \
+            --jq '[.[] | select(.name | startswith("v1.5.12-r")) | .name] | .[0]' || echo "")
           
           if [ -z "$LATEST" ]; then
-            NEW_TAG="${BASE_VERSION}-r0"
-            echo "No existing tags found, starting with: $NEW_TAG"
+            NEW_TAG="$BASE"
           else
             REV=$(echo "$LATEST" | sed -n 's/.*-r\([0-9]\+\)$/\1/p')
-            if [ -z "$REV" ]; then
-              echo "::error::Failed to parse revision from: $LATEST"
-              exit 1
-            fi
-            NEW_TAG="${BASE_VERSION}-r$((REV + 1))"
-            echo "Latest tag: $LATEST (rev $REV)"
-            echo "New tag: $NEW_TAG"
+            NEW_TAG="v1.5.12-r$((${REV:-0} + 1))"
           fi
           
           echo "NEW_TAG=$NEW_TAG" >> $GITHUB_ENV
-          echo "📌 Tag to be created: $NEW_TAG"
-          
-          # Auto-detect prerelease based on tag name
-          if [[ "$NEW_TAG" =~ (alpha|beta|rc|test|dev|pre) ]]; then
-            echo "IS_PRERELEASE=true" >> $GITHUB_ENV
-            echo "🔬 Detected as prerelease"
-          else
-            echo "IS_PRERELEASE=false" >> $GITHUB_ENV
-            echo "🎯 Detected as stable release"
-          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
+          git push origin "$NEW_TAG"
 
       - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
-          path: ./all-artifacts
+          path: ./artifacts
 
-      - name: Organize Assets
-        id: organize
-        shell: bash
+      - name: Generate Notes
         run: |
-          set -euo pipefail
-
-          # Ensure Bash is available (mapfile requirement)
-          [ -n "${BASH_VERSION-}" ] || { echo "::error::Bash is required"; exit 1; }
+          cat << EOF > notes.md
+          SukiSU Ultra with SUSFS v1.5.12
           
-          echo "has_assets=false" >> "$GITHUB_OUTPUT"
-          echo "::group::Organizing Artifacts"
+          **Module:** https://github.com/sidex15/ksu_module_susfs  
+          **Manager:** https://github.com/SukiSU-Ultra/SukiSU-Ultra  
           
-          # Check artifacts directory exists
-          if [ ! -d ./all-artifacts ]; then
-            echo "::warning::Artifacts directory missing"
-            echo "::endgroup::"
-            exit 0
-          fi
-          
-          mkdir -p ./release-assets
-          
-          zip_count=0
-          last_file=""
-          
-          # Trap for unexpected errors, show last processed file and contents
-          trap 'echo "::error::Organizer aborted. Last processed: ${last_file:-none}"; ls -la ./release-assets 2>/dev/null || true' ERR
-          
-          echo "Scanning for ZIP files..."
-          
-          # Collect all ZIP files into an array (avoid SIGPIPE)
-          if ! mapfile -d '' -t zip_files < <(find ./all-artifacts -type f -name "*.zip" -print0 2>/dev/null); then
-            echo "::error::Failed to scan artifacts directory"
-            echo "::endgroup::"
-            exit 1
-          fi
-          
-          # Early exit if no files found
-          if [ "${#zip_files[@]}" -eq 0 ]; then
-            echo "Found 0 ZIP file(s) to process"
-            echo "::endgroup::"
-            echo "ZIP files found: 0"
-            echo "::warning::No ZIP files found"
-            echo "::group::Debug: Directory contents"
-            find ./all-artifacts -type f -ls 2>/dev/null | head -50 || echo "Empty"
-            echo "::endgroup::"
-            exit 0
-          fi
-          
-          echo "Found ${#zip_files[@]} ZIP file(s) to process"
-          
-          # Sort for deterministic order (NUL-safe)
-          printf '%s\0' "${zip_files[@]}" | LC_ALL=C sort -z | mapfile -d '' -t zip_files
-          
-          # Disable exit on error inside loop to handle errors gracefully
-          set +e
-          
-          for zip in "${zip_files[@]}"; do
-            [ -f "$zip" ] || continue
-          
-            filename=$(basename -- "$zip")
-            if [ $? -ne 0 ] || [ -z "$filename" ]; then
-              echo "::error::basename failed for: $zip"
-              continue
-            fi
-            last_file="$filename"
-          
-            if [ -f "./release-assets/$filename" ]; then
-              echo "::warning::Duplicate: $filename (skipping)"
-              continue
-            fi
-          
-            if ! cp -f -- "$zip" "./release-assets/$filename"; then
-              echo "::error::Failed to copy: $zip"
-              continue
-            fi
-          
-            echo "✓ Copied: $filename"
-            ((zip_count++))
-          done
-          
-          # Re-enable exit on error after loop
-          set -e
-          
-          echo "::endgroup::"
-          echo "ZIP files found: $zip_count"
-          
-          # Handle case where files were found but none copied
-          if [ "$zip_count" -eq 0 ]; then
-            echo "::warning::No ZIP files copied (all duplicates or errors)"
-            echo "::group::Debug: Directory contents"
-            find ./all-artifacts -type f -ls 2>/dev/null | head -50 || echo "Empty"
-            echo "::endgroup::"
-            exit 0
-          fi
-          
-          # Success case
-          echo "✅ Organized $zip_count ZIP file(s)"
-          echo ""
-          echo "Final assets:"
-          ls -lh ./release-assets/ 2>/dev/null || true
-          
-          total_size=$(du -sh -- ./release-assets 2>/dev/null | awk '{print $1}' || echo "0")
-          echo "Total size: $total_size"
-          
-          echo "has_assets=true" >> "$GITHUB_OUTPUT"
-
-      - name: Generate Release Notes
-        shell: bash
-        run: |
-          set -euo pipefail
-          
-          cat << 'EOF' > notes.md
-          # 🚀 SukiSU Ultra with SUSFS v1.5.2+
-          
-          **SUSFS Module:** https://github.com/sidex15/susfs4ksu-module (v1.5.2+ branch)  
-          **SukiSU Manager:** https://github.com/SukiSU-Ultra/SukiSU-Ultra  
-          **SUSFS Kernel:** https://gitlab.com/simonpunk/susfs4ksu  
-          
-          ## 📱 Built Devices
-          
-          | Device | Kernel | Android | SukiSU | SUSFS | Status |
-          |--------|--------|---------|--------|-------|--------|
+          ### Built Devices
+          | Model | Version |
+          |-------|---------|
           EOF
           
-          # Process each build_info.txt
-          device_count=0
-          while IFS= read -r -d '' info; do
-            model=$(basename "$info" | sed 's/build_info_\(.*\)\.txt/\1/')
-            
-            kernel_ver=$(grep "^Kernel Version:" "$info" 2>/dev/null | cut -d: -f2- | xargs || echo "?")
-            android_ver=$(grep "^Android Version:" "$info" 2>/dev/null | cut -d: -f2- | xargs || echo "?")
-            sukisu_ver=$(grep "^SukiSU Version:" "$info" 2>/dev/null | cut -d: -f2- | xargs || echo "?")
-            susfs_ver=$(grep "^SUSFS Version:" "$info" 2>/dev/null | cut -d: -f2- | xargs || echo "?")
-            
-            # Find corresponding ZIP and verify SUSFS module
-            zip_file=$(find ./release-assets -name "*${model}*.zip" -type f 2>/dev/null | head -1)
-            
-            if [ -n "$zip_file" ] && [ -f "$zip_file" ] && unzip -l "$zip_file" 2>/dev/null | grep -q "ksu_module_susfs"; then
-              status="✅"
-            else
-              status="⚠️"
-            fi
-            
-            printf "| %-12s | %-18s | %-8s | %-8s | %-8s | %s |\n" \
-              "$model" "$kernel_ver" "$android_ver" "$sukisu_ver" "$susfs_ver" "$status" >> notes.md
-            
-            ((device_count++))
-          done < <(find ./release-assets -name "build_info_*.txt" -type f -print0 | sort -z)
-          
-          if [ "$device_count" -eq 0 ]; then
-            echo "| *No builds completed* | - | - | - | - | ❌ |" >> notes.md
-          fi
+          find artifacts -name "*.txt" -type f | sort | while read f; do
+            printf "| %-12s | %-16s |\n" "$(basename "$f" .txt)" "$(cat "$f")" >> notes.md
+          done
           
           cat << 'EOF' >> notes.md
-
-          ## ✨ Features
-          - ⚡ **SukiSU Ultra Manager** (Latest from susfs-main branch)
-          - 🛡️ **SUSFS v1.5.2+** (Kernel patches + KSU module included)
-          - 🔐 Magic Mount support
-          - 🔒 WireGuard VPN support
-          - 🚀 BBR TCP congestion control
-          - 🐛 Ptrace fix for kernels <5.16
-          - 🎯 Flexible hook types (Manual/Kprobe/Tracepoint)
-          - 💾 ZRAM with advanced compressors (LZ4K, LZ4KD, 842)
-          - ⚙️ BBG LSM (Baseband Guard)
-          - 🔧 Optimized builds (O2/O3)
           
-          ## 📦 What's Included
-          Each kernel ZIP contains:
-          - ✅ Kernel Image with SukiSU Ultra & SUSFS patches
-          - ✅ SUSFS KSU Module (v1.5.2+ from CI)
-          - ✅ AnyKernel3 flasher
-          - ✅ All necessary tools and scripts
-          
-          ## 📥 Installation
-          1. **Download** the ZIP or AK3 file for your device. If ZIP unzip to get the AK3 zip file          
-          3. **Flash** the AK2 ZIP file using Kernel Flasher / SukiSU Ultra Manager (to enable KPM)
-          4. **Reboot** to system
-                    
-          ## ⚙️ Build Configuration
-          - **Hook:** `${{ inputs.hook }}`
-          - **LSM:** `${{ inputs.lsm }}`
-          - **ZRAM:** `${{ inputs.enable_zram }}`
-          - **Optimization:** `${{ inputs.optimize_level }}`
-          
-          ## 🔍 Verification
-          After flashing, verify SUSFS is active:
-          ```bash
-          su -c "dmesg | grep -i susfs"
-          ```
-          
-          You should see SUSFS initialization messages.
-          
-          ## ⚠️ Legend
-          - ✅ = SUSFS module confirmed in package
-          - ⚠️ = SUSFS module missing (verify before flashing)
-          
-          ---
-          **Build Date:** $(date -u '+%Y-%m-%d %H:%M UTC')  
-          **Build Run:** #${{ github.run_number }}  
-          **Commit:** ${{ github.sha }}  
-          **Workflow:** ${{ github.workflow }}
+          ### Features
+          - SukiSU Ultra Manager
+          - SUSFS v1.5.12
+          - Wireguard
+          - Magic Mount
+          - Ptrace fix (<5.16)
+          - Manual/Kprobe/Tracepoint Hooks
+          - TMPFS_XATTR [Mountify]
+          - BBR v1
+          - HMBIRD scx (6.6)
+          - BBG (optional)
+          - ZRAM algorithms (optional)
+          - IP Set
           EOF
-          
-          echo "Generated release notes for $device_count device(s)"
-          
-          echo "::group::Release Notes Preview"
-          cat notes.md
-          echo "::endgroup::"
 
-      - name: Create Release with Assets
-        shell: bash
+      - name: Create Release
         run: |
-          set -euo pipefail
-          
-          echo "::group::Preparing release"
-          
-          # Determine prerelease flag
-          if [ "${{ env.IS_PRERELEASE }}" = "true" ]; then
-            PRERELEASE_FLAG="--prerelease"
-            echo "Creating as prerelease"
-          else
-            PRERELEASE_FLAG="--latest"
-            echo "Creating as latest stable release"
-          fi
-          
-          # Collect all assets (ZIPs and build info files)
-          ASSETS=()
-          while IFS= read -r -d '' file; do
-            ASSETS+=("$file")
-          done < <(find ./release-assets -type f \( -name "*.zip" -o -name "build_info_*.txt" \) -print0 | sort -z)
-          
-          if [ ${#ASSETS[@]} -eq 0 ]; then
-            echo "::error::No assets found to upload!"
-            exit 1
-          fi
-          
-          echo "Found ${#ASSETS[@]} asset(s) to upload:"
-          printf '  - %s\n' "${ASSETS[@]}"
-          
-          echo "::endgroup::"
-          
-          # Create release with all assets in one atomic operation
-          for attempt in {1..3}; do
-            echo "::group::Attempt $attempt/3: Creating release ${{ env.NEW_TAG }}"
-            
-            if gh release create "${{ env.NEW_TAG }}" \
+          for i in {1..3}; do
+            gh release create "${{ env.NEW_TAG }}" \
               --repo "${{ github.repository }}" \
-              --title "${{ env.RELEASE_NAME }} (${{ env.NEW_TAG }})" \
+              --title "${{ env.RELEASE_NAME }}" \
               --notes-file notes.md \
-              --target "${{ github.sha }}" \
-              $PRERELEASE_FLAG \
-              "${ASSETS[@]}"; then
-              
-              echo "::endgroup::"
-              echo "✅ Release created successfully!"
-              exit 0
-            fi
-            
-            echo "::endgroup::"
-            echo "⚠️ Attempt $attempt failed"
-            
-            if [ $attempt -lt 3 ]; then
-              sleep_time=$((attempt * 5))
-              echo "Retrying in ${sleep_time}s..."
-              sleep $sleep_time
-            fi
+              --prerelease && exit 0
+            echo "Retry $i/3..."
+            sleep 5
           done
-          
-          echo "::error::Failed to create release after 3 attempts"
           exit 1
 
-      - name: Verify Release
-        if: success()
-        shell: bash
+      - name: Upload Assets
         run: |
-          set -euo pipefail
+          find artifacts -name "*.zip" -type f | while read zip; do
+            name=$(basename "$zip")
+            
+            for i in {1..3}; do
+              if gh release upload "${{ env.NEW_TAG }}" "$zip" \
+                 --repo "${{ github.repository }}" --clobber; then
+                echo "✅ $name"
+                break
+              fi
+              echo "⚠️ Retry $i/3: $name"
+              sleep 5
+            done
+          done
           
-          echo "::group::Verifying release ${{ env.NEW_TAG }}"
-          
-          # Wait for GitHub API to process
-          sleep 3
-          
-          # Get release info
-          RELEASE_INFO=$(gh release view "${{ env.NEW_TAG }}" \
+          # Simple verification
+          uploaded=$(gh release view "${{ env.NEW_TAG }}" \
             --repo "${{ github.repository }}" \
-            --json tagName,name,url,assets,isDraft,isPrerelease,createdAt)
+            --json assets --jq '.assets | length')
           
-          ASSET_COUNT=$(echo "$RELEASE_INFO" | jq '.assets | length')
-          IS_DRAFT=$(echo "$RELEASE_INFO" | jq -r '.isDraft')
-          IS_PRERELEASE=$(echo "$RELEASE_INFO" | jq -r '.isPrerelease')
-          RELEASE_URL=$(echo "$RELEASE_INFO" | jq -r '.url')
-          CREATED_AT=$(echo "$RELEASE_INFO" | jq -r '.createdAt')
+          echo "✅ Release has $uploaded asset(s)"
           
-          echo "Release Details:"
-          echo "  Tag: ${{ env.NEW_TAG }}"
-          echo "  URL: $RELEASE_URL"
-          echo "  Assets: $ASSET_COUNT"
-          echo "  Draft: $IS_DRAFT"
-          echo "  Prerelease: $IS_PRERELEASE"
-          echo "  Created: $CREATED_AT"
-          
-          if [ "$ASSET_COUNT" -eq 0 ]; then
-            echo "::error::No assets found in release!"
+          if [ "$uploaded" -eq 0 ]; then
+            echo "::error::No assets in release!"
             exit 1
           fi
-          
-          echo ""
-          echo "Uploaded Assets:"
-          echo "$RELEASE_INFO" | jq -r '.assets[] | "  - \(.name) (\(.size | tonumber | (. / 1048576 | floor))MB)"'
-          
-          echo "::endgroup::"
-          echo "✅ Release verified successfully!"
 
       - name: Release Summary
         if: always()
-        shell: bash
         run: |
-          status="${{ job.status }}"
-          [ "$status" = "success" ] && emoji="✅" || emoji="❌"
-          
           cat >> $GITHUB_STEP_SUMMARY << EOF
-          # $emoji Release: ${{ env.NEW_TAG }}
+          # 🎉 Release: ${{ env.NEW_TAG }}
           
-          **Status:** $status  
-          **Type:** $([ "${{ env.IS_PRERELEASE }}" = "true" ] && echo "Prerelease 🔬" || echo "Stable 🎯")  
+          **Status:** ${{ job.status }}  
           **URL:** https://github.com/${{ github.repository }}/releases/tag/${{ env.NEW_TAG }}
           
-          ## 📦 Assets
+          ## Assets
+          | File | Size |
+          |------|------|
           EOF
           
-          if [ "$status" = "success" ]; then
-            # Fetch actual uploaded assets from release
-            gh release view "${{ env.NEW_TAG }}" \
-              --repo "${{ github.repository }}" \
-              --json assets \
-              --jq '.assets[] | "- `\(.name)` (\((.size | tonumber) / 1048576 | floor)MB)"' \
-              >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "- Could not fetch asset list" >> $GITHUB_STEP_SUMMARY
-          else
-            # Show what we tried to upload
-            find ./release-assets -name "*.zip" -type f 2>/dev/null | sort | while read -r f; do
-              filename=$(basename "$f")
-              size_bytes=$(stat -c%s "$f" 2>/dev/null || echo "0")
-              size_mb=$((size_bytes / 1048576))
-              
-              if unzip -l "$f" 2>/dev/null | grep -q "ksu_module_susfs"; then
-                status_icon="✅"
-              else
-                status_icon="⚠️"
-              fi
-              
-              echo "- $status_icon \`$filename\` (${size_mb}MB)" >> $GITHUB_STEP_SUMMARY
-            done || echo "- No assets found" >> $GITHUB_STEP_SUMMARY
-          fi
-          
-          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-          
-          ## 🔧 Configuration
-          | Setting | Value |
-          |---------|-------|
-          | Hook | `${{ inputs.hook }}` |
-          | LSM | `${{ inputs.lsm }}` |
-          | ZRAM | `${{ inputs.enable_zram }}` |
-          | Optimization | `${{ inputs.optimize_level }}` |
-          
-          **Legend:** ✅ = SUSFS module included | ⚠️ = SUSFS module missing
-          EOF
+          find artifacts -name "*.zip" -type f | while read f; do
+            echo "| \`$(basename "$f")\` | $(stat -c%s "$f" | numfmt --to=iec-i --suffix=B) |" >> $GITHUB_STEP_SUMMARY
+          done
