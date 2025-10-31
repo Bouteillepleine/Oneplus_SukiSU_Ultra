@@ -94,19 +94,34 @@ jobs:
           
           [ ! -d "configs" ] && { echo "::error::configs/ not found!"; exit 1; }
           
-          declare -a models=()
+          # Use associative array to track unique models
+          declare -A unique_models=()
+          
           while IFS= read -r -d '' file; do
-            models+=("$(basename "$file" .json)")
-          done < <(find configs/ -name "*.json" -print0)
+            model_name=$(basename "$file" .json)
+            # Only add if not already present (prevents duplicates)
+            if [ ! -v "unique_models[$model_name]" ]; then
+              unique_models[$model_name]=1
+              echo "Adding model: $model_name"
+            else
+              echo "::warning::Skipping duplicate model: $model_name"
+              continue
+            fi
+          done < <(find configs/ -name "*.json" -print0 | sort -z)
           
-          [ ${#models[@]} -eq 0 ] && { echo "::error::No configs found!"; exit 1; }
+          [ ${#unique_models[@]} -eq 0 ] && { echo "::error::No configs found!"; exit 1; }
           
-          echo "Found ${#models[@]} config(s)"
+          echo "Found ${#unique_models[@]} unique config(s)"
           
+          # Create matrix with unique models only
           echo "[" > matrix.json
           first=true
-          for model in "${models[@]}"; do
+          for model in "${!unique_models[@]}"; do
             file="configs/$model.json"
+            if [ ! -f "$file" ]; then
+              echo "::warning::Config file not found: $file"
+              continue
+            fi
             jq empty "$file" 2>/dev/null || { echo "::warning::Invalid JSON: $file"; continue; }
             [ "$first" = false ] && echo "," >> matrix.json
             jq -r '.' "$file" >> matrix.json
@@ -118,7 +133,7 @@ jobs:
           jq_filter="."
           
           if [[ "$input" == "ALL" ]]; then
-            echo "Building all"
+            echo "Building all ${#unique_models[@]} unique models"
           elif [[ "$input" == android*-* ]]; then
             IFS='-' read -r av kv <<< "$input"
             jq_filter="map(select(.android_version == \"$av\" and .kernel_version == \"$kv\"))"
@@ -127,7 +142,15 @@ jobs:
           fi
           
           filtered=$(jq -c "$jq_filter" matrix.json)
-          [ "$(echo "$filtered" | jq 'length')" -eq 0 ] && { echo "::error::No match: $input"; exit 1; }
+          filtered_count=$(echo "$filtered" | jq 'length')
+          
+          if [ "$filtered_count" -eq 0 ]; then
+            echo "::error::No match: $input"
+            echo "Available models: ${!unique_models[@]}"
+            exit 1
+          fi
+          
+          echo "Filtered to $filtered_count model(s)"
           
           wrapped=$(jq -n --argjson items "$filtered" '{ include: $items }')
           
@@ -139,7 +162,7 @@ jobs:
           
           {
             echo "### 📱 Build Matrix"
-            echo "**Input:** \`$input\` | **Count:** $(echo "$filtered" | jq 'length')"
+            echo "**Input:** \`$input\` | **Unique Count:** $filtered_count"
             echo '```json'
             echo "$wrapped" | jq '.'
             echo '```'
@@ -155,6 +178,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Verify Unique Models
+        shell: bash
+        run: |
+          echo "Verifying matrix for duplicates..."
+          count=$(echo '${{ toJSON(matrix) }}' | jq '.include | length')
+          unique_count=$(echo '${{ toJSON(matrix) }}' | jq '.include | unique_by(.model) | length')
+          
+          if [ "$count" -ne "$unique_count" ]; then
+            echo "::error::Found duplicates in matrix! Total: $count, Unique: $unique_count"
+            echo "Duplicates:"
+            echo '${{ toJSON(matrix) }}' | jq '.include | group_by(.model) | map(select(length > 1))'
+            exit 1
+          fi
+          echo "✅ No duplicates found: $unique_count unique models"
 
       - name: Build
         id: build
@@ -185,6 +223,28 @@ jobs:
           done
           [ $missing -gt 0 ] && exit 1 || exit 0
 
+      - name: Fix Double ZIP Extension
+        shell: bash
+        run: |
+          cd artifacts
+          # Fix any files with double .zip.zip extension
+          for file in *.zip.zip; do
+            if [ -f "$file" ]; then
+              new_name="${file%.zip}"
+              echo "Fixing double extension: $file -> $new_name"
+              mv "$file" "$new_name"
+            fi
+          done
+          
+          # Also check for .zip.zip.zip (triple) just in case
+          for file in *.zip.zip.zip; do
+            if [ -f "$file" ]; then
+              new_name="${file%.zip.zip}"
+              echo "Fixing triple extension: $file -> $new_name"
+              mv "$file" "$new_name"
+            fi
+          done
+
       - name: Summary
         if: always()
         shell: bash
@@ -211,8 +271,8 @@ jobs:
         with:
           name: kernel-${{ matrix.model }}-${{ matrix.android_version }}-${{ matrix.kernel_version }}
           path: |
-            ${{ matrix.model }}/artifacts/*.zip
-            ${{ matrix.model }}/artifacts/*.txt
+            artifacts/*.zip
+            artifacts/*.txt
           retention-days: 7
           if-no-files-found: error
 
@@ -233,25 +293,34 @@ jobs:
         run: |
           BASE="v1.5.12-r0"
           LATEST=$(gh api repos/${{ github.repository }}/tags \
-            --jq '[.[] | select(.name | startswith("v1.5.12-r")) | .name] | .[0]' || echo "")
+            --jq '[.[] | select(.name | startswith("v1.5.12-r")) | .name] | .[极]' || echo "")
           
           if [ -z "$LATEST" ]; then
             NEW_TAG="$BASE"
           else
-            REV=$(echo "$LATEST" | sed -n 's/.*-r\([0-9]\+\)$/\1/p')
+            REV=$(echo "$极ATEST" | sed -n 's/.*-r\([0-9]\+\)$/\1/p')
             NEW_TAG="v1.5.12-r$((${REV:-0} + 1))"
           fi
           
           echo "NEW_TAG=$NEW_TAG" >> $GITHUB_ENV
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
+          git tag -a "$NEW_TAG" -极 "Release $NEW_TAG"
           git push origin "$NEW_TAG"
 
       - name: Download Artifacts
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts
+
+      - name: Fix Double ZIP Extensions in Downloaded Artifacts
+        shell: bash
+        run: |
+          find artifacts -name "*.zip.zip" -type f | while read file; do
+            new_name="${file%.zip}"
+            echo "Fixing double extension: $file -> $new_name"
+            mv "$file" "$new_name"
+          done
 
       - name: Generate Notes
         run: |
