@@ -44,15 +44,6 @@ outputs:
   zip_name:
     description: 'Created ZIP filename'
     value: ${{ steps.create_zip.outputs.zip_name }}
-  zip_size:
-    description: 'ZIP file size in bytes'
-    value: ${{ steps.create_zip.outputs.zip_size }}
-  zip_sha256:
-    description: 'ZIP file SHA256 checksum'
-    value: ${{ steps.create_zip.outputs.zip_sha256 }}
-  image_sha256:
-    description: 'Kernel Image SHA256 checksum'
-    value: ${{ steps.collect_stats.outputs.image_sha256 }}
 
 runs:
   using: composite
@@ -65,22 +56,6 @@ runs:
         jq -r 'to_entries[] | "OP_\(.key | ascii_upcase)=\(.value)"' /tmp/config.json >> "$GITHUB_ENV"
         echo "Parsed config:"
         jq '.' /tmp/config.json
-
-    - name: Free Up Disk Space
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::group::Free up disk space"
-        df -h
-        
-        # Remove large pre-installed packages
-        sudo rm -rf /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/lib/android /usr/local/.ghcup || true
-        sudo apt-get clean || true
-        sudo rm -rf /var/lib/apt/lists/* || true
-        docker system prune -af || true
-        
-        df -h
-        echo "::endgroup::"
 
     - name: Validate Inputs
       shell: bash
@@ -201,22 +176,6 @@ runs:
         echo "✅ Kernel source synced"
         echo "::endgroup::"
 
-    - name: Clean Up After Sync
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::group::Clean up after sync"
-        CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
-        
-        # Remove .repo (no longer needed)
-        rm -rf "$CONFIG_DIR/.repo" || true
-        
-        # Remove .git directories
-        find "$CONFIG_DIR/kernel_platform" -name ".git" -type d -prune -exec rm -rf {} + 2>/dev/null || true
-        
-        df -h
-        echo "::endgroup::"
-
     - name: Get Kernel Version Info
       shell: bash
       run: |
@@ -247,7 +206,8 @@ runs:
         PATCHLEVEL=$(grep '^PATCHLEVEL *=' Makefile | awk '{print $3}')
         SUBLEVEL=$(grep '^SUBLEVEL *=' Makefile | awk '{print $3}')
         FULL_VERSION="$VERSION.$PATCHLEVEL.$SUBLEVEL"
-        cd "$ARTIFACTS_DIR"        
+        cd "$ARTIFACTS_DIR"
+        echo "$ANDROID_VERSION-$FULL_VERSION" > "${OP_MODEL}.txt"
         echo "ANDROID_VER=$ANDROID_VERSION" >> "$GITHUB_ENV"
         echo "KERNEL_VER=$VERSION.$PATCHLEVEL" >> "$GITHUB_ENV"
         echo "KERNEL_FULL_VER=$ANDROID_VERSION-$FULL_VERSION" >> "$GITHUB_ENV"
@@ -504,11 +464,6 @@ runs:
         echo "Manager Version: $KSU_VERSION"
         grep -A 10 "REPO_OWNER" kernel/Makefile || true
         echo "::endgroup::"
-
-        echo "SUKISUVER=$KSU_VERSION" >> "$GITHUB_ENV"
-        
-        # Also export the full version string
-        echo "KSU_VERSION_FULL=$VERSION_FULL" >> "$GITHUB_ENV"
     
         echo "✅ SukiSU Ultra successfully added"
         echo "   Version: $VERSION_FULL"
@@ -1046,26 +1001,6 @@ runs:
         echo "============================================"
         echo "::endgroup::"
 
-    - name: Clean Up Build Artifacts
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::group::Clean up intermediate build files"
-        OUT="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common/out"
-        
-        if [ -d "$OUT" ]; then
-          # Remove object files (largest consumers)
-          find "$OUT" -name "*.o" -type f -delete 2>/dev/null || true
-          find "$OUT" -name "*.cmd" -type f -delete 2>/dev/null || true
-          find "$OUT" -name ".*.d" -type f -delete 2>/dev/null || true
-          
-          # Remove intermediate directories
-          rm -rf "$OUT/obj" "$OUT/.tmp_"* 2>/dev/null || true
-        fi
-        
-        df -h
-        echo "::endgroup::"
-
     - name: ccache post-build stats
       if: always()
       shell: bash
@@ -1076,40 +1011,41 @@ runs:
         echo "::endgroup::"
 
     - name: Save Build Metadata
+      id: save_metadata
       shell: bash
-      working-directory: ${{ env.CONFIG }}
       run: |
         set -euo pipefail
+        CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
+        ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
+        mkdir -p "$ARTIFACTS_DIR"
         
-        mkdir -p artifacts
+        KERNEL_VERSION="${KERNEL_FULL_VER:-unknown}"
+        SUKISU_VERSION="${SUKISUVER:-unknown}"
+        SUSFS_VERSION="${SUSVER:-unknown}"
         
-        # Use finalized values from environment
-        KERNEL_VER="${FINAL_KERNEL_VERSION:-${KERNEL_FULL_VER:-unknown}}"
-        SUKISU_VER="${FINAL_SUKISU_VERSION:-${SUKISUVER:-unknown}}"
-        SUSFS_VER="${FINAL_SUSFS_VERSION:-${SUSVER:-unknown}}"
-        ANDROID_VER="${ANDROID_VER:-unknown}"
-        WARNINGS="${WARNINGS_COUNT:-0}"
-        IMAGE_SHA="${IMAGE_SHA256:-unknown}"
-        ZIP_SHA="${ZIP_SHA256:-unknown}"
+        if [ -z "$KERNEL_VERSION" ] || [ "$KERNEL_VERSION" = "unknown" ]; then
+          echo "::warning::KERNEL_FULL_VER not set, using fallback"
+          KERNEL_VERSION="unknown"
+        fi
         
-        cat > artifacts/build_info.txt << EOF
-        Build Date: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-        Kernel Version: ${KERNEL_VER}
-        Android Version: ${ANDROID_VER}
-        Kernel Base: ${KERNEL_VER}
-        SukiSU Version: ${SUKISU_VER}
-        SUSFS Version: ${SUSFS_VER}
-        Hook Type: ${{ inputs.hook }}
-        LSM Enabled: ${{ inputs.lsm }}
-        ZRAM Enabled: ${{ inputs.enable_zram }}
-        Optimization: ${{ inputs.optimize_level }}
-        Build Warnings: ${WARNINGS}
-        Image SHA256: ${IMAGE_SHA}
-        ZIP SHA256: ${ZIP_SHA}
-        EOF
+        if [ -z "$SUKISU_VERSION" ] || [ "$SUKISU_VERSION" = "unknown" ]; then
+          echo "::warning::SUKISUVER not set, using fallback"
+          SUKISU_VERSION="unknown"
+        fi
         
-        echo "✅ Build metadata saved"
-        cat artifacts/build_info.txt
+        if [ -z "$SUSFS_VERSION" ] || [ "$SUSFS_VERSION" = "unknown" ]; then
+          echo "::warning::SUSVER not set, using fallback"
+          SUSFS_VERSION="unknown"
+        fi
+        
+        printf 'kernel_version=%s\n' "$KERNEL_VERSION" >> "$GITHUB_OUTPUT"
+        printf 'sukisu_version=%s\n' "$SUKISU_VERSION" >> "$GITHUB_OUTPUT"
+        printf 'susfs_version=%s\n' "$SUSFS_VERSION" >> "$GITHUB_OUTPUT"
+        
+        echo "✅ Metadata saved:"
+        echo "   - Kernel: $KERNEL_VERSION"
+        echo "   - SukiSU: $SUKISU_VERSION"
+        echo "   - SUSFS: $SUSFS_VERSION"
 
     - name: Collect Build Stats / Validate Image
       id: collect_stats
@@ -1122,91 +1058,36 @@ runs:
         OUT="$COMMON/out"
         IMG="$OUT/arch/arm64/boot/Image"
         
-        # Count warnings - use temp file to avoid stdout issues
-        WARNINGS_COUNT=0
         if [ -f "$COMMON/build.log" ]; then
-          # Write to temp file first
-          grep -ciE '\bwarning:' "$COMMON/build.log" 2>/dev/null > /tmp/warn_count.txt || echo "0" > /tmp/warn_count.txt
-          count_output=$(cat /tmp/warn_count.txt | tr -d '[:space:]')
-          if [ -n "$count_output" ] && [[ "$count_output" =~ ^[0-9]+$ ]]; then
-            WARNINGS_COUNT="$count_output"
-          fi
-          rm -f /tmp/warn_count.txt
+          WARNINGS_COUNT="$(grep -ciE '\bwarning:' "$COMMON/build.log" || true)"
+          [ -n "$WARNINGS_COUNT" ] || WARNINGS_COUNT="0"
+        else
+          WARNINGS_COUNT="0"
         fi
         
-        # Validate image exists
         if [ ! -f "$IMG" ]; then
           echo "::error::Kernel Image not found at: $IMG"
           exit 1
         fi
         
-        # Validate image format
         if ! file "$IMG" | grep -qi 'ARM64'; then
           echo "::error::Image is not ARM64 format"
           file "$IMG"
           exit 1
         fi
         
-        # Get image size
-        IMG_SIZE=$(stat -c%s "$IMG" 2>/dev/null || echo "0")
-        if ! [[ "$IMG_SIZE" =~ ^[0-9]+$ ]] || [ "$IMG_SIZE" -eq 0 ]; then
-          echo "::error::Failed to get valid image size"
-          exit 1
-        fi
-        
-        # Validate minimum size
+        IMG_SIZE=$(stat -c %s "$IMG")
         MIN_SIZE=6102400
         if [ "$IMG_SIZE" -lt "$MIN_SIZE" ]; then
           echo "::error::Image size too small: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE") (minimum: $(numfmt --to=iec-i --suffix=B "$MIN_SIZE"))"
           exit 1
         fi
         
-        # Calculate SHA256 - use temp file
-        sha256sum "$IMG" 2>/dev/null > /tmp/sha256.txt || true
-        IMG_SHA256=$(cat /tmp/sha256.txt 2>/dev/null | awk '{print $1}' | tr -d '[:space:]')
-        rm -f /tmp/sha256.txt
-        
-        # Validate SHA256 format
-        if [ -z "$IMG_SHA256" ] || ! [[ "$IMG_SHA256" =~ ^[a-f0-9]{64}$ ]]; then
-          echo "::error::Failed to compute valid SHA256 checksum"
-          echo "::error::Got: '${IMG_SHA256:-empty}'"
-          exit 1
-        fi
-        
-        # Final validation before writing outputs
-        if ! [[ "$WARNINGS_COUNT" =~ ^[0-9]+$ ]]; then
-          echo "::error::Invalid warnings count: '$WARNINGS_COUNT'"
-          exit 1
-        fi
-        
-        if ! [[ "$IMG_SIZE" =~ ^[0-9]+$ ]]; then
-          echo "::error::Invalid image size: '$IMG_SIZE'"
-          exit 1
-        fi
-        
-        if ! [[ "$IMG_SHA256" =~ ^[a-f0-9]{64}$ ]]; then
-          echo "::error::Invalid SHA256: '$IMG_SHA256'"
-          exit 1
-        fi
-        
-        # Write to outputs using printf (more reliable than cat with heredoc)
-        {
-          printf "warnings_count=%s\n" "$WARNINGS_COUNT"
-          printf "image_size=%s\n" "$IMG_SIZE"
-          printf "image_sha256=%s\n" "$IMG_SHA256"
-        } >> "$GITHUB_OUTPUT"
-        
-        # Write to environment using printf
-        {
-          printf "WARNINGS_COUNT=%s\n" "$WARNINGS_COUNT"
-          printf "IMAGE_SIZE=%s\n" "$IMG_SIZE"
-          printf "IMAGE_SHA256=%s\n" "$IMG_SHA256"
-        } >> "$GITHUB_ENV"
+        printf 'warnings_count=%s\n' "$WARNINGS_COUNT" >> "$GITHUB_OUTPUT"
         
         echo "✅ Validation passed:"
-        echo "   - Warnings: ${WARNINGS_COUNT}"
+        echo "   - Warnings: $WARNINGS_COUNT"
         echo "   - Image size: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")"
-        echo "   - Image SHA256: ${IMG_SHA256}"
 
     - name: Download and Package ZRAM Module
       if: ${{ inputs.enable_zram == 'true' }}
@@ -1293,80 +1174,19 @@ runs:
         
         if [ -z "$LATEST_RUN_ID" ]; then
           echo "⚠️ No successful run found for branch v1.5.2+"
-          echo "susfs_module_downloaded=false" >> "$GITHUB_ENV"
         else
           ARTIFACT_URL=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
             "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts" | \
             jq -r '.artifacts[0].archive_download_url')
-          
-          if [ -n "$ARTIFACT_URL" ] && [ "$ARTIFACT_URL" != "null" ]; then
-            if curl -L -H "Authorization: Bearer $GITHUB_TOKEN" -o ksu_module_susfs_1.5.2+_CI.zip "$ARTIFACT_URL"; then
-              echo "✅ SUSFS module downloaded successfully"
-              ls -lh ksu_module_susfs_1.5.2+_CI.zip
-              echo "susfs_module_downloaded=true" >> "$GITHUB_ENV"
-            else
-              echo "⚠️ Failed to download SUSFS module"
-              echo "susfs_module_downloaded=false" >> "$GITHUB_ENV"
-            fi
+          if [ -n "$ARTIFACT_URL" ] && [ "$ARTIFACT_URL" != "null" ] ; then
+            curl -L -H "Authorization: Bearer $GITHUB_TOKEN" -o ksu_module_susfs_1.5.2+_CI.zip "$ARTIFACT_URL"
+            echo "✅ SUSFS module downloaded successfully"
+            ls -lh ksu_module_susfs_1.5.2+_CI.zip
           else
             echo "⚠️ Failed to fetch artifact URL"
-            echo "susfs_module_downloaded=false" >> "$GITHUB_ENV"
           fi
         fi
         echo "::endgroup::"
-
-    - name: Clean Packaging Directories
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::group::Clean packaging directories"
-        
-        ANYKERNEL3="$GITHUB_WORKSPACE/AnyKernel3"
-        ARTIFACTS_DIR="$GITHUB_WORKSPACE/${{ env.CONFIG }}/artifacts"
-        
-        mkdir -p "$ARTIFACTS_DIR"
-        
-        echo "Cleaning AnyKernel3 directory (preserving SUSFS module)..."
-        cd "$ANYKERNEL3"
-        
-        # Delete all .zip files EXCEPT ksu_module_susfs*.zip
-        find . -maxdepth 1 -type f -name "*.zip" ! -name "ksu_module_susfs*.zip" -delete 2>/dev/null || true
-        
-        # Delete .zip.* files (but not the SUSFS module)
-        find . -maxdepth 1 -type f -name "*.zip.*" ! -name "ksu_module_susfs*.zip.*" -delete 2>/dev/null || true
-        
-        # Delete kernel-* files (but not .txt files)
-        find . -maxdepth 1 -type f -name "kernel-*" ! -name "*.txt" -delete 2>/dev/null || true
-        
-        echo "Cleaning artifacts directory..."
-        find "$ARTIFACTS_DIR" -maxdepth 1 -type f -name "*.zip" -delete 2>/dev/null || true
-        find "$ARTIFACTS_DIR" -maxdepth 1 -type f -name "*.zip.*" -delete 2>/dev/null || true
-        
-        echo "✅ Directories cleaned"
-        echo ""
-        echo "AnyKernel3 contents after cleaning:"
-        ls -lah "$ANYKERNEL3/" 2>/dev/null | head -20 || echo "Empty or not found"
-        
-        # Verify SUSFS module is still present (if it was downloaded)
-        if [ "${susfs_module_downloaded:-false}" = "true" ]; then
-          echo ""
-          echo "Checking for SUSFS module..."
-          if ls ksu_module_susfs*.zip 1> /dev/null 2>&1; then
-            echo "✅ SUSFS module preserved:"
-            # Safely expand the glob via array
-            mapfile -t susfs_list < <(ls -1 ksu_module_susfs*.zip 2>/dev/null || true)
-            if [ "${#susfs_list[@]}" -gt 0 ]; then
-              ls -lh "${susfs_list[@]}"
-            fi
-          else
-            # Non-fatal informational message to avoid policy-induced failures
-            echo "ℹ️ SUSFS module was downloaded but not found after cleaning (non-fatal)"
-            echo "This may cause issues in the next step."
-          fi
-        fi
-        
-        echo "::endgroup::"
-        exit 0
 
     - name: Create Kernel ZIP
       id: create_zip
@@ -1375,460 +1195,57 @@ runs:
         set -euo pipefail
         echo "::group::Create kernel ZIP package"
         
-        CONFIG_DIR="$GITHUB_WORKSPACE/${{ env.CONFIG }}"
-        ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
+        CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
         IMAGE_PATH="$CONFIG_DIR/kernel_platform/common/out/arch/arm64/boot/Image"
-        ANYKERNEL3="$GITHUB_WORKSPACE/AnyKernel3"
         
-        # Validate kernel image exists
         if [ ! -f "$IMAGE_PATH" ]; then
           echo "::error::Built Image not found at: $IMAGE_PATH"
           exit 1
         fi
         
-        # Copy kernel image to AnyKernel3
-        echo "Copying kernel Image..."
-        cp "$IMAGE_PATH" "$ANYKERNEL3/Image"
+        cp "$IMAGE_PATH" "$GITHUB_WORKSPACE/AnyKernel3/Image"
+        cd "$GITHUB_WORKSPACE/AnyKernel3"
         
-        # Change to AnyKernel3 directory
-        cd "$ANYKERNEL3"
-        
-        # Determine ZRAM suffix
         ZRAM_SUFFIX=""
         if [ "${{ inputs.enable_zram }}" = "true" ]; then
           ZRAM_SUFFIX="_ZRAM"
         fi
         
-        # Use saved metadata with sanitization
-        KERNEL_VER=$(echo "${FINAL_KERNEL_VERSION:-${KERNEL_FULL_VER:-unknown}}" | tr -d '[:space:]')
-        SUKISU_VER=$(echo "${FINAL_SUKISU_VERSION:-${SUKISUVER:-unknown}}" | tr -d '[:space:]')
-        SUSFS_VER=$(echo "${FINAL_SUSFS_VERSION:-${SUSVER:-unknown}}" | tr -d '[:space:]')
-        
-        # Fallback to 'unknown' if empty
-        [ -z "$KERNEL_VER" ] && KERNEL_VER="unknown"
-        [ -z "$SUKISU_VER" ] && SUKISU_VER="unknown"
-        [ -z "$SUSFS_VER" ] && SUSFS_VER="unknown"
-        
-        # Construct ZIP name
-        ZIP_NAME="AnyKernel3_${OP_MODEL}_${KERNEL_VER}_SukiSU_${SUKISU_VER}_${SUSFS_VER}${ZRAM_SUFFIX}.zip"
-        
-        # Validate ZIP name
-        if [ -z "$ZIP_NAME" ] || [ "$ZIP_NAME" = ".zip" ]; then
-          echo "::error::Invalid ZIP name: '$ZIP_NAME'"
-          exit 1
-        fi
+        ZIP_NAME="AnyKernel3_${OP_MODEL}_${{ env.KERNEL_FULL_VER }}_SukiSU_${SUKISUVER}_${SUSVER}${ZRAM_SUFFIX}.zip"
+        ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
+        mkdir -p "$ARTIFACTS_DIR"
         
         echo "Creating flashable ZIP: $ZIP_NAME"
-        
-        # Build inclusion list dynamically (only include what exists)
-        INCLUDE_ITEMS=(
-          "Image"
-          "anykernel.sh"
-          "banner"
-        )
-        
-        # Add directories if they exist
-        for dir in META-INF tools modules patch ramdisk dtb dtbo vendor_overlay kernel-dtb vendor_boot init_boot recovery; do
-          if [ -d "$dir" ] || [ -e "$dir" ]; then
-            INCLUDE_ITEMS+=("$dir/")
-          fi
-        done
-        
-        # ============================================
-        # CRITICAL FIX: Add SUSFS module explicitly
-        # ============================================
-        SUSFS_MODULE=""
-        # Search for SUSFS module with wildcard
-        for f in ksu_module_susfs*.zip; do
-          if [ -f "$f" ]; then
-            SUSFS_MODULE="$f"
-            break
-          fi
-        done
-        
-        if [ -n "$SUSFS_MODULE" ]; then
-          INCLUDE_ITEMS+=("$SUSFS_MODULE")
-          echo "✅ SUSFS module will be included: $SUSFS_MODULE"
-          ls -lh "$SUSFS_MODULE"
-        else
-          echo "⚠️ SUSFS module not found"
-          echo "Available .zip files:"
-          ls -lh *.zip 2>/dev/null || echo "No .zip files found"
-        fi
-        
-        # Show what will be included
-        echo ""
-        echo "Files to be included in ZIP:"
-        printf '  - %s\n' "${INCLUDE_ITEMS[@]}"
-        
-        # ============================================
-        # CRITICAL FIX: Proper exclusion pattern
-        # ============================================
-        # Create ZIP with exclusions that DON'T affect SUSFS module
-        # We exclude by specific patterns, NOT by wildcards that catch our module
-        
-        EXCLUDE_PATTERNS=(
-          "*.git*"
-          ".git/*"
-          "kernel-*"
-          "*.tar"
-          "*.tar.*"
-          "*.tgz"
-          "*.7z"
-          "*.rar"
-          # Exclude specific unwanted ZIPs (but not ksu_module_susfs*.zip)
-          "AnyKernel3_*.zip"
-          "ZRAM-Module*.zip"
-          "old_*.zip"
-          "backup_*.zip"
-        )
-        
-        # Build the exclusion arguments
-        EXCLUDE_ARGS=()
-        for pattern in "${EXCLUDE_PATTERNS[@]}"; do
-          EXCLUDE_ARGS+=("-x" "$pattern")
-        done
-        
-        # Create the ZIP
-        if ! zip -r "$ARTIFACTS_DIR/$ZIP_NAME" \
-          "${INCLUDE_ITEMS[@]}" \
-          "${EXCLUDE_ARGS[@]}" \
-          >/dev/null 2>&1; then
+        if ! zip -r "$ARTIFACTS_DIR/$ZIP_NAME" ./* -x "*.git*" >/dev/null 2>&1; then
           echo "::error::Failed to create ZIP package"
           exit 1
         fi
         
-        # Verify ZIP was created
         if [ ! -f "$ARTIFACTS_DIR/$ZIP_NAME" ]; then
-          echo "::error::ZIP file not found after creation"
+          echo "::error::ZIP file not found after creation: $ARTIFACTS_DIR/$ZIP_NAME"
           exit 1
         fi
         
-        # Get ZIP size
-        ZIP_SIZE=$(stat -c%s "$ARTIFACTS_DIR/$ZIP_NAME" 2>/dev/null || echo "0")
-        if [ "$ZIP_SIZE" -eq 0 ]; then
-          echo "::error::ZIP file is empty"
-          exit 1
-        fi
+        ZIP_SIZE=$(stat -c%s "$ARTIFACTS_DIR/$ZIP_NAME")
+        ZIP_SHA256=$(sha256sum "$ARTIFACTS_DIR/$ZIP_NAME" | awk '{print $1}')
         
-        # Calculate SHA256
-        ZIP_SHA256=$(sha256sum "$ARTIFACTS_DIR/$ZIP_NAME" 2>/dev/null | awk '{print $1}' | tr -d '[:space:]')
+        echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+        echo "ZIP_SIZE=$ZIP_SIZE" >> "$GITHUB_OUTPUT"
+        echo "ZIP_SHA256=$ZIP_SHA256" >> "$GITHUB_OUTPUT"
         
-        if [ -z "$ZIP_SHA256" ]; then
-          echo "::error::Failed to compute ZIP SHA256"
-          exit 1
-        fi
-        
-        # Write outputs
-        {
-          printf "zip_name=%s\n" "$ZIP_NAME"
-          printf "zip_size=%s\n" "$ZIP_SIZE"
-          printf "zip_sha256=%s\n" "$ZIP_SHA256"
-        } >> "$GITHUB_OUTPUT"
-        
-        # Write to environment for downstream steps
-        {
-          printf "ZIP_NAME=%s\n" "$ZIP_NAME"
-          printf "ZIP_SIZE=%s\n" "$ZIP_SIZE"
-          printf "ZIP_SHA256=%s\n" "$ZIP_SHA256"
-        } >> "$GITHUB_ENV"
-        
-        echo ""
         echo "✅ Kernel ZIP created successfully"
-        echo "   Name: ${ZIP_NAME}"
-        echo "   Size: $(numfmt --to=iec-i --suffix=B "$ZIP_SIZE" 2>/dev/null || echo "$ZIP_SIZE bytes")"
-        echo "   SHA256: ${ZIP_SHA256}"
-        
-        # Verify SUSFS module is actually in the ZIP
-        if [ -n "$SUSFS_MODULE" ]; then
-          echo ""
-          echo "Verifying SUSFS module in ZIP..."
-          if unzip -l "$ARTIFACTS_DIR/$ZIP_NAME" | grep -q "ksu_module_susfs"; then
-            echo "✅ SUSFS module confirmed in ZIP"
-            # Show the exact entry
-            unzip -l "$ARTIFACTS_DIR/$ZIP_NAME" | grep "ksu_module_susfs"
-          else
-            echo "::warning::SUSFS module NOT found in ZIP despite being present in source"
-            echo "ZIP contents:"
-            unzip -l "$ARTIFACTS_DIR/$ZIP_NAME" | head -30
-          fi
-        fi
-        
+        echo "   Name: $ZIP_NAME"
+        echo "   Size: $(numfmt --to=iec-i --suffix=B "$ZIP_SIZE")"
+        echo "   SHA256: $ZIP_SHA256"
         echo "::endgroup::"
 
-    - name: Verify Package Integrity
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::group::Verify package integrity"
-        
-        ARTIFACTS_DIR="$GITHUB_WORKSPACE/${{ env.CONFIG }}/artifacts"
-        ZIP_FILE="$ARTIFACTS_DIR/${{ steps.create_zip.outputs.zip_name }}"
-        
-        # ============================================
-        # 1. Check ZIP file exists
-        # ============================================
-        if [ ! -f "$ZIP_FILE" ]; then
-          echo "::error::ZIP file not found: $ZIP_FILE"
-          exit 1
-        fi
-        
-        echo "Verifying: $(basename "$ZIP_FILE")"
-        
-        # ============================================
-        # 2. Validate ZIP size
-        # ============================================
-        MIN_ZIP_SIZE=8388608  # 8 MB
-        ZIP_SIZE=$(stat -c%s "$ZIP_FILE" 2>/dev/null || echo "0")
-        
-        if [ "$ZIP_SIZE" -lt "$MIN_ZIP_SIZE" ]; then
-          echo "::error::ZIP file too small: $(numfmt --to=iec-i --suffix=B "$ZIP_SIZE") (minimum: $(numfmt --to=iec-i --suffix=B "$MIN_ZIP_SIZE"))"
-          exit 1
-        fi
-        
-        echo "✅ ZIP size valid: $(numfmt --to=iec-i --suffix=B "$ZIP_SIZE")"
-        
-        # ============================================
-        # 3. Test ZIP integrity
-        # ============================================
-        echo ""
-        echo "Testing ZIP integrity..."
-        if ! unzip -t "$ZIP_FILE" >/dev/null 2>&1; then
-          echo "::error::ZIP file is corrupted or invalid"
-          exit 1
-        fi
-        
-        echo "✅ ZIP integrity test passed"
-        
-        # ============================================
-        # 4. Extract file list (single pass)
-        # ============================================
-        echo ""
-        echo "Extracting file list..."
-        
-        # Use a single unzip call and parse output efficiently
-        mapfile -t ALL_FILES < <(unzip -l "$ZIP_FILE" 2>/dev/null | \
-          awk '
-            BEGIN { in_list = 0 }
-            /^Archive:/ { next }
-            /^  Length/ { in_list = 1; next }
-            /^---------/ { 
-              if (in_list) in_list = 2
-              next 
-            }
-            in_list == 2 && NF >= 4 { 
-              # Extract filename (everything from 4th field onwards)
-              filename = ""
-              for (i=4; i<=NF; i++) {
-                filename = filename (i==4 ? "" : " ") $i
-              }
-              if (filename != "") print filename
-            }
-          ')
-        
-        if [ ${#ALL_FILES[@]} -eq 0 ]; then
-          echo "::error::Failed to extract file list from ZIP"
-          exit 1
-        fi
-        
-        echo "Found ${#ALL_FILES[@]} entries in ZIP"
-        
-        # ============================================
-        # 5. Check for unwanted nested archives
-        # ============================================
-        echo ""
-        echo "Checking for unwanted nested archives..."
-        
-        UNWANTED=()
-        SUSFS_FOUND=false
-        
-        for file in "${ALL_FILES[@]}"; do
-          # Skip directories
-          [[ "$file" == */ ]] && continue
-          
-          # Check if it's an archive
-          if [[ "$file" =~ \.(zip|tar|tar\.gz|tar\.xz|tgz|7z|rar)$ ]]; then
-            # Check if it's an allowed SUSFS module
-            case "$file" in
-              ksu_module_susfs*.zip)
-                SUSFS_FOUND=true
-                echo "  ✓ Allowed: $file"
-                ;;
-              modules/ksu_module_susfs*.zip)
-                SUSFS_FOUND=true
-                echo "  ✓ Allowed: $file"
-                ;;
-              */ksu_module_susfs*.zip)
-                SUSFS_FOUND=true
-                echo "  ✓ Allowed: $file"
-                ;;
-              *)
-                UNWANTED+=("$file")
-                ;;
-            esac
-          fi
-        done
-        
-        if [ ${#UNWANTED[@]} -gt 0 ]; then
-          echo "::error::❌ Unwanted nested archives detected:"
-          printf '  - %s\n' "${UNWANTED[@]}"
-          exit 1
-        fi
-        
-        echo "✅ No unwanted nested archives found"
-        
-        # ============================================
-        # 6. Verify SUSFS module (if downloaded)
-        # ============================================
-        if [ "${susfs_module_downloaded:-false}" = "true" ]; then
-          echo ""
-          echo "Verifying SUSFS module presence..."
-          
-          if [ "$SUSFS_FOUND" = true ]; then
-            # Find and display the exact path
-            for file in "${ALL_FILES[@]}"; do
-              if [[ "$file" =~ ksu_module_susfs.*\.zip$ ]]; then
-                echo "  ✅ SUSFS module found: $file"
-              fi
-            done
-          else
-            echo "::warning::SUSFS module was downloaded but not found in ZIP"
-            echo "Expected pattern: ksu_module_susfs*.zip"
-            echo ""
-            echo "Available files in ZIP:"
-            printf '  - %s\n' "${ALL_FILES[@]}" | head -20
-          fi
-        fi
-        
-        # ============================================
-        # 7. Verify required files
-        # ============================================
-        echo ""
-        echo "Verifying required files..."
-        
-        REQUIRED_FILES=("Image" "anykernel.sh")
-        MISSING_FILES=()
-        
-        for req_file in "${REQUIRED_FILES[@]}"; do
-          found=false
-          for file in "${ALL_FILES[@]}"; do
-            if [ "$file" = "$req_file" ]; then
-              found=true
-              break
-            fi
-          done
-          
-          if [ "$found" = false ]; then
-            MISSING_FILES+=("$req_file")
-          fi
-        done
-        
-        if [ ${#MISSING_FILES[@]} -gt 0 ]; then
-          echo "::error::Required files missing:"
-          printf '  - %s\n' "${MISSING_FILES[@]}"
-          exit 1
-        fi
-        
-        echo "✅ All required files present"
-        
-        # ============================================
-        # 8. Check for META-INF (optional)
-        # ============================================
-        META_INF_FOUND=false
-        for file in "${ALL_FILES[@]}"; do
-          if [[ "$file" == META-INF/* ]]; then
-            META_INF_FOUND=true
-            break
-          fi
-        done
-        
-        if [ "$META_INF_FOUND" = true ]; then
-          echo "✅ META-INF/ found"
-        else
-          echo "⚠️ Warning: META-INF/ not found (may be intentional for some recovery variants)"
-        fi
-        
-        # ============================================
-        # 9. Display statistics
-        # ============================================
-        echo ""
-        echo "📊 ZIP Statistics:"
-        echo "   - Total entries: ${#ALL_FILES[@]}"
-        echo "   - Compressed size: $(numfmt --to=iec-i --suffix=B "$ZIP_SIZE")"
-        
-        # Count files vs directories (with safe arithmetic)
-        FILE_COUNT=0
-        DIR_COUNT=0
-        
-        for file in "${ALL_FILES[@]}"; do
-          if [[ "$file" == */ ]]; then
-            DIR_COUNT=$((DIR_COUNT + 1))
-          else
-            FILE_COUNT=$((FILE_COUNT + 1))
-          fi
-        done
-        
-        echo "   - Files: $FILE_COUNT"
-        echo "   - Directories: $DIR_COUNT"
-        
-        # ============================================
-        # 10. Show structure preview
-        # ============================================
-        echo ""
-        echo "Top-level structure (first 20 entries):"
-        
-        count=0
-        for file in "${ALL_FILES[@]}"; do
-          if [ $count -ge 20 ]; then
-            break
-          fi
-          echo "  $file"
-          count=$((count + 1))
-        done
-        
-        if [ ${#ALL_FILES[@]} -gt 20 ]; then
-          echo "  ... and $((${#ALL_FILES[@]} - 20)) more entries"
-        fi
-        
-        # ============================================
-        # 11. Final summary
-        # ============================================
-        echo ""
-        echo "============================================"
-        echo "✅ Package integrity verification passed"
-        echo "============================================"
-        
-        echo "::endgroup::"
-
-    - name: Save Final Metadata
-      id: save_metadata
-      shell: bash
-      run: |
-        set -euo pipefail
-        
-        # Use sanitized values from environment
-        KERNEL_VER="${KERNEL_FULL_VER:-unknown}"
-        SUKISU_VER="${SUKISUVER:-unknown}"
-        SUSFS_VER="${SUSVER:-unknown}"
-        
-        # Write to outputs
-        {
-          printf "kernel_version=%s\n" "$KERNEL_VER"
-          printf "sukisu_version=%s\n" "$SUKISU_VER"
-          printf "susfs_version=%s\n" "$SUSFS_VER"
-        } >> "$GITHUB_OUTPUT"
-        
-        # Also write to env for build_info.txt
-        {
-          printf "FINAL_KERNEL_VERSION=%s\n" "$KERNEL_VER"
-          printf "FINAL_SUKISU_VERSION=%s\n" "$SUKISU_VER"
-          printf "FINAL_SUSFS_VERSION=%s\n" "$SUSFS_VER"
-        } >> "$GITHUB_ENV"
-        
-        echo "✅ Metadata outputs set:"
-        echo "   Kernel: $KERNEL_VER"
-        echo "   SukiSU: $SUKISU_VER"
-        echo "   SUSFS: $SUSFS_VER"
+    - name: Upload Kernel Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.create_zip.outputs.zip_name }}
+        path: ${{ env.CONFIG }}/artifacts/${{ steps.create_zip.outputs.zip_name }}
+        retention-days: 30
+        if-no-files-found: error
 
     - name: Upload ZRAM Module (if enabled)
       if: ${{ inputs.enable_zram == 'true' && steps.zram_find.outputs.upload == 'true' }}
@@ -1846,14 +1263,6 @@ runs:
         echo "## 🎯 Build Summary" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        # Build status indicator
-        if [ "${{ job.status }}" = "success" ]; then
-          echo "### ✅ Build Status: **SUCCESS**" >> $GITHUB_STEP_SUMMARY
-        else
-          echo "### ❌ Build Status: **FAILED**" >> $GITHUB_STEP_SUMMARY
-        fi
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
         echo "### 📦 Build Information" >> $GITHUB_STEP_SUMMARY
         echo "| Component | Version |" >> $GITHUB_STEP_SUMMARY
         echo "|-----------|---------|" >> $GITHUB_STEP_SUMMARY
@@ -1866,50 +1275,21 @@ runs:
         echo "| **Optimization** | ${{ inputs.optimize_level }} |" >> $GITHUB_STEP_SUMMARY
         echo "| **ZRAM** | ${{ inputs.enable_zram }} |" >> $GITHUB_STEP_SUMMARY
         echo "| **BBG LSM** | ${{ inputs.lsm }} |" >> $GITHUB_STEP_SUMMARY
-        
-        # Add SUSFS module status
-        if [ "${susfs_module_downloaded:-false}" = "true" ]; then
-          echo "| **SUSFS Module** | ✅ Included |" >> $GITHUB_STEP_SUMMARY
-        else
-          echo "| **SUSFS Module** | ⚠️ Not downloaded |" >> $GITHUB_STEP_SUMMARY
-        fi
-        
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        # Only show download section if build succeeded
-        if [ "${{ job.status }}" = "success" ]; then
-          ZIP_NAME="${{ steps.create_zip.outputs.zip_name }}"
-          if [ -n "$ZIP_NAME" ]; then
-            echo "### 📥 Download" >> $GITHUB_STEP_SUMMARY
-            echo "**Filename:** \`$ZIP_NAME\`" >> $GITHUB_STEP_SUMMARY
+        if [ -n "${{ steps.create_zip.outputs.zip_name }}" ]; then
+          echo "### 📥 Download" >> $GITHUB_STEP_SUMMARY
+          echo "**Filename:** \`${{ steps.create_zip.outputs.zip_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ -n "${{ steps.create_zip.outputs.ZIP_SIZE }}" ]; then
+            SIZE_MB=$(echo "scale=2; ${{ steps.create_zip.outputs.ZIP_SIZE }} / 1024 / 1024" | bc)
+            echo "**Size:** ${SIZE_MB} MB" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          if [ -n "${{ steps.create_zip.outputs.ZIP_SHA256 }}" ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
-            
-            ZIP_SIZE="${{ steps.create_zip.outputs.zip_size }}"
-            if [ -n "$ZIP_SIZE" ] && [ "$ZIP_SIZE" != "0" ]; then
-              SIZE_MB=$(echo "scale=2; $ZIP_SIZE / 1024 / 1024" | bc 2>/dev/null || echo "N/A")
-              echo "**Size:** ${SIZE_MB} MB" >> $GITHUB_STEP_SUMMARY
-            fi
-            
-            ZIP_SHA="${{ steps.create_zip.outputs.zip_sha256 }}"
-            if [ -n "$ZIP_SHA" ]; then
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "**SHA256:** \`$ZIP_SHA\`" >> $GITHUB_STEP_SUMMARY
-            fi
-            
-            # Add download instructions
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "#### 📲 Installation Instructions" >> $GITHUB_STEP_SUMMARY
-            echo "1. Download the ZIP file from the artifacts section" >> $GITHUB_STEP_SUMMARY
-            echo "2. Reboot to recovery (TWRP/OrangeFox recommended)" >> $GITHUB_STEP_SUMMARY
-            echo "3. Flash the ZIP file" >> $GITHUB_STEP_SUMMARY
-            echo "4. Reboot and enjoy!" >> $GITHUB_STEP_SUMMARY
-            
-            # Add SUSFS module note if included
-            if [ "${susfs_module_downloaded:-false}" = "true" ]; then
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo "**Note:** SUSFS module (ksu_module_susfs_1.5.2+_CI.zip) is included in the flashable ZIP." >> $GITHUB_STEP_SUMMARY
-              echo "It will be automatically installed during the flash process." >> $GITHUB_STEP_SUMMARY
-            fi
+            echo "**SHA256:** \`${{ steps.create_zip.outputs.ZIP_SHA256 }}\`" >> $GITHUB_STEP_SUMMARY
           fi
         fi
         
@@ -1923,38 +1303,14 @@ runs:
           echo "- **Build Time:** ${BUILD_MIN}m ${BUILD_SEC}s" >> $GITHUB_STEP_SUMMARY
         fi
         
-        WARNINGS="${{ steps.collect_stats.outputs.warnings_count }}"
-        if [ -n "$WARNINGS" ]; then
-          if [ "$WARNINGS" -eq 0 ]; then
-            echo "- **Warnings:** ✅ None" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "- **Warnings:** ⚠️ $WARNINGS" >> $GITHUB_STEP_SUMMARY
-          fi
+        if [ -n "${{ steps.collect_stats.outputs.warnings_count }}" ]; then
+          echo "- **Warnings:** ${{ steps.collect_stats.outputs.warnings_count }}" >> $GITHUB_STEP_SUMMARY
         fi
         
         if [ -n "${CLANG_VERSION:-}" ]; then
           echo "- **Compiler:** ${CLANG_VERSION}" >> $GITHUB_STEP_SUMMARY
         fi
         
-        # Add ccache stats if available
-        if [ -n "${CCACHE_DIR:-}" ] && command -v ccache >/dev/null 2>&1; then
-          CACHE_HIT_RATE=$(ccache -s 2>/dev/null | grep "cache hit rate" | awk '{print $NF}' || echo "N/A")
-          if [ "$CACHE_HIT_RATE" != "N/A" ]; then
-            echo "- **ccache Hit Rate:** $CACHE_HIT_RATE" >> $GITHUB_STEP_SUMMARY
-          fi
-        fi
-        
-        # Add checksums section (only if build succeeded)
-        if [ "${{ job.status }}" = "success" ]; then
-          IMAGE_SHA="${{ steps.collect_stats.outputs.image_sha256 }}"
-          if [ -n "$IMAGE_SHA" ] || [ -n "${ZIP_SHA:-}" ]; then
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### 🔐 Checksums" >> $GITHUB_STEP_SUMMARY
-            [ -n "$IMAGE_SHA" ] && echo "- **Image SHA256:** \`$IMAGE_SHA\`" >> $GITHUB_STEP_SUMMARY
-            [ -n "${ZIP_SHA:-}" ] && echo "- **ZIP SHA256:** \`$ZIP_SHA\`" >> $GITHUB_STEP_SUMMARY
-          fi
-        fi
-        
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "---" >> $GITHUB_STEP_SUMMARY
-        echo "*Built with ❤️ using GitHub Actions | Run #${{ github.run_number }}*" >> $GITHUB_STEP_SUMMARY
+        echo "*Built with ❤️ using GitHub Actions*" >> $GITHUB_STEP_SUMMARY
