@@ -197,6 +197,7 @@ jobs:
     timeout-minutes: 180
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix: ${{ fromJSON(needs.set-op-model.outputs.matrix) }}
     steps:
       - name: Checkout
@@ -211,31 +212,40 @@ jobs:
           echo "::group::Generate Cache Keys"
           
           # ============================================
-          # CANONICAL JSON NORMALIZATION
+          # STABLE CACHE KEY GENERATION
           # ============================================
           
-          MATRIX_JSON='${{ toJSON(matrix) }}'
+          # Use explicit matrix fields (guaranteed stable)
+          MODEL="${{ matrix.model }}"
+          KERNEL_VER="${{ matrix.kernel_version }}"
+          ANDROID_VER="${{ matrix.android_version }}"
+          SOC="${{ matrix.soc }}"
+          BRANCH="${{ matrix.branch }}"
+          MANIFEST="${{ matrix.manifest }}"
           
-          # Validate matrix context
-          if [ "$MATRIX_JSON" = "null" ] || [ -z "$MATRIX_JSON" ]; then
-            echo "::error::No matrix context available!"
-            exit 1
-          fi
+          # Validate required fields
+          for field in MODEL KERNEL_VER ANDROID_VER SOC BRANCH MANIFEST; do
+            if [ -z "${!field}" ]; then
+              echo "::error::Missing required matrix field: $field"
+              exit 1
+            fi
+          done
           
-          # Canonicalize JSON (sorted keys, compact format, stable output)
-          CANONICAL_JSON=$(echo "$MATRIX_JSON" | jq -cS '.')
+          # Create stable config string (sorted, explicit)
+          CONFIG_STRING=$(printf '%s|%s|%s|%s|%s|%s' \
+            "$ANDROID_VER" "$BRANCH" "$KERNEL_VER" "$MANIFEST" "$MODEL" "$SOC" | \
+            tr -cd '[:alnum:]|._-')
           
-          if [ -z "$CANONICAL_JSON" ] || [ "$CANONICAL_JSON" = "null" ]; then
-            echo "::error::Failed to canonicalize matrix JSON!"
-            echo "Original JSON: $MATRIX_JSON"
-            exit 1
-          fi
+          CONFIG_HASH=$(printf '%s' "$CONFIG_STRING" | sha256sum | cut -c1-8)
           
-          # Hash the canonical form (guaranteed stable)
-          CONFIG_HASH=$(printf '%s' "$CANONICAL_JSON" | sha256sum | cut -c1-8)
-          
-          echo "Matrix configuration:"
-          echo "$CANONICAL_JSON" | jq '.'
+          echo "Config components:"
+          echo "  Model: $MODEL"
+          echo "  Kernel: $KERNEL_VER"
+          echo "  Android: $ANDROID_VER"
+          echo "  SOC: $SOC"
+          echo "  Branch: $BRANCH"
+          echo "  Manifest: $MANIFEST"
+          echo "  Hash: $CONFIG_HASH"
           
           # ============================================
           # BUILD INPUTS HASH
@@ -248,76 +258,37 @@ jobs:
             "${{ inputs.optimize_level }}" | sha256sum | cut -c1-8)
           
           # ============================================
-          # CLANG VERSION HANDLING
+          # CACHE VERSION (bump when toolchain changes)
           # ============================================
           
-          # Option A: Use environment variable if set by previous step
-          if [ -n "${CLANG_VERSION:-}" ]; then
-            CLANG_SHORT=$(echo "$CLANG_VERSION" | sha256sum | cut -c1-8)
-            echo "Using pre-detected Clang version: $CLANG_VERSION"
-          
-          # Option B: Try to detect from config file
-          elif [ -f "configs/clang-version.txt" ]; then
-            CLANG_VERSION=$(cat configs/clang-version.txt | tr -d '[:space:]')
-            CLANG_SHORT=$(echo "$CLANG_VERSION" | sha256sum | cut -c1-8)
-            echo "Loaded Clang version from config: $CLANG_VERSION"
-            echo "CLANG_VERSION=$CLANG_VERSION" >> $GITHUB_ENV
-          
-          # Option C: Use cache version instead (manual bump strategy)
-          else
-            CACHE_VERSION="v1"  # Bump this when Clang updates
-            CLANG_SHORT="$CACHE_VERSION"
-            echo "::notice::Using manual cache version: $CACHE_VERSION (no Clang version available)"
-          fi
+          CACHE_VERSION="v2"
           
           # ============================================
           # CONSTRUCT CACHE KEYS
           # ============================================
           
-          # Ccache key (includes all variable factors)
-          CCACHE_KEY="ccache-${{ matrix.model }}-${{ matrix.kernel_version }}-${{ matrix.android_version }}-${CONFIG_HASH}-${INPUT_HASH}-${CLANG_SHORT}"
+          # Ccache key format: ccache-<model>-<kernel>-<android>-<config_hash>-<input_hash>-<cache_ver>
+          CCACHE_KEY="ccache-${MODEL}-${KERNEL_VER}-${ANDROID_VER}-${CONFIG_HASH}-${INPUT_HASH}-${CACHE_VERSION}"
           
-          # Prebuilts key (only depends on config file content)
-          PREBUILTS_HASH="${{ hashFiles(format('configs/{0}.json', matrix.model)) }}"
-          
-          # Validate prebuilts hash
-          if [ -z "$PREBUILTS_HASH" ] || [ "$PREBUILTS_HASH" = "null" ]; then
-            echo "::error::Failed to compute prebuilts hash for ${{ matrix.model }}"
-            exit 1
-          fi
-          
-          PREBUILTS_KEY="prebuilts-${{ matrix.model }}-${{ matrix.kernel_version }}-${PREBUILTS_HASH}"
+          # Prebuilts key (only depends on device config)
+          PREBUILTS_KEY="prebuilts-${MODEL}-${KERNEL_VER}-${ANDROID_VER}-${CONFIG_HASH}"
           
           # ============================================
           # EXPORT OUTPUTS
           # ============================================
           
-          echo "ccache_key=$CCACHE_KEY" >> $GITHUB_OUTPUT
-          echo "prebuilts_key=$PREBUILTS_KEY" >> $GITHUB_OUTPUT
+          echo "ccache_key=$CCACHE_KEY" >> "$GITHUB_OUTPUT"
+          echo "prebuilts_key=$PREBUILTS_KEY" >> "$GITHUB_OUTPUT"
           
-          # Export ccache environment
           CCACHE_DIR="$HOME/.ccache"
-          echo "CCACHE_DIR=$CCACHE_DIR" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=5G" >> $GITHUB_ENV
+          echo "CCACHE_DIR=$CCACHE_DIR" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=5G" >> "$GITHUB_ENV"
           
-          # ============================================
-          # SUMMARY
-          # ============================================
-          
-          echo ""
-          echo "📊 Cache Key Components:"
-          echo "  Model: ${{ matrix.model }}"
-          echo "  Kernel: ${{ matrix.kernel_version }}"
-          echo "  Android: ${{ matrix.android_version }}"
-          echo "  Config Hash: $CONFIG_HASH (from canonical JSON)"
-          echo "  Input Hash: $INPUT_HASH"
-          echo "  Clang Token: $CLANG_SHORT"
           echo ""
           echo "🔑 Generated Keys:"
           echo "  Ccache: $CCACHE_KEY"
           echo "  Prebuilts: $PREBUILTS_KEY"
-          echo ""
-          echo "📁 Cache Directory: $CCACHE_DIR"
+          echo "  Cache Dir: $CCACHE_DIR"
           
           echo "::endgroup::"
 
@@ -332,6 +303,26 @@ jobs:
             ccache-${{ matrix.model }}-${{ matrix.kernel_version }}-
             ccache-${{ matrix.model }}-
           enableCrossOsArchive: false
+
+      - name: Install ccache
+        shell: bash
+        run: |
+          set -euo pipefail
+          
+          if ! command -v ccache >/dev/null 2>&1; then
+            echo "Installing ccache..."
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ccache
+            
+            if ! command -v ccache >/dev/null 2>&1; then
+              echo "::error::Failed to install ccache"
+              exit 1
+            fi
+            
+            echo "✅ ccache installed: $(ccache --version | head -1)"
+          else
+            echo "✅ ccache already available: $(ccache --version | head -1)"
+          fi
 
       - name: Configure Ccache
         shell: bash
@@ -372,7 +363,7 @@ jobs:
           echo "Ccache configuration:"
           ccache -p | grep -E '(max_size|compiler_check|sloppiness|hash_dir|compression)' || ccache -p
           
-          # Show initial state (DON'T reset stats with -z for cumulative tracking)
+          # Show initial state
           echo ""
           echo "Initial ccache state:"
           ccache -s
@@ -501,7 +492,6 @@ jobs:
           # Extract hit rate with robust parsing
           CACHE_HIT_RATE=$(echo "$STATS_OUTPUT" | awk -F': ' '
             /cache hit rate/ {
-              # Remove percentage sign and whitespace
               gsub(/%/, "", $2)
               gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
               print $2
@@ -534,7 +524,7 @@ jobs:
           ' | awk '{print $1}')
           [ -z "$CACHE_MISSES" ] || ! [[ "$CACHE_MISSES" =~ ^[0-9]+$ ]] && CACHE_MISSES=0
           
-          # Safe arithmetic (guaranteed numeric)
+          # Safe arithmetic
           TOTAL_HITS=$((DIRECT_HITS + PREPROCESSED_HITS))
           TOTAL_CALLS=$((TOTAL_HITS + CACHE_MISSES))
           
@@ -554,15 +544,15 @@ jobs:
             CACHE_STATUS="❌ Cold start"
           fi
           
-          # Export for summary (all values guaranteed safe)
-          echo "CACHE_HIT_RATE=$CACHE_HIT_RATE" >> $GITHUB_ENV
-          echo "CACHE_SIZE=$CACHE_SIZE" >> $GITHUB_ENV
-          echo "CACHE_SIZE_BYTES=$CACHE_SIZE_BYTES" >> $GITHUB_ENV
-          echo "CACHE_STATUS=$CACHE_STATUS" >> $GITHUB_ENV
-          echo "TOTAL_HITS=$TOTAL_HITS" >> $GITHUB_ENV
-          echo "CACHE_MISSES=$CACHE_MISSES" >> $GITHUB_ENV
-          echo "TOTAL_CALLS=$TOTAL_CALLS" >> $GITHUB_ENV
-          echo "FILE_COUNT=$FILE_COUNT" >> $GITHUB_ENV
+          # Export for summary
+          echo "CACHE_HIT_RATE=$CACHE_HIT_RATE" >> "$GITHUB_ENV"
+          echo "CACHE_SIZE=$CACHE_SIZE" >> "$GITHUB_ENV"
+          echo "CACHE_SIZE_BYTES=$CACHE_SIZE_BYTES" >> "$GITHUB_ENV"
+          echo "CACHE_STATUS=$CACHE_STATUS" >> "$GITHUB_ENV"
+          echo "TOTAL_HITS=$TOTAL_HITS" >> "$GITHUB_ENV"
+          echo "CACHE_MISSES=$CACHE_MISSES" >> "$GITHUB_ENV"
+          echo "TOTAL_CALLS=$TOTAL_CALLS" >> "$GITHUB_ENV"
+          echo "FILE_COUNT=$FILE_COUNT" >> "$GITHUB_ENV"
           
           echo ""
           echo "📊 Cache Performance:"
@@ -583,9 +573,8 @@ jobs:
           
           CCACHE_DIR="${{ env.CCACHE_DIR }}"
           
-          # Validate directory exists
           if [ ! -d "$CCACHE_DIR" ]; then
-            echo "present=false" >> $GITHUB_OUTPUT
+            echo "present=false" >> "$GITHUB_OUTPUT"
             echo "⚠️ Cache directory doesn't exist"
             exit 0
           fi
@@ -601,12 +590,12 @@ jobs:
           MIN_FILES=10
           
           if [ "$SIZE" -gt "$MIN_SIZE" ] && [ "$FILE_COUNT" -gt "$MIN_FILES" ]; then
-            echo "present=true" >> $GITHUB_OUTPUT
+            echo "present=true" >> "$GITHUB_OUTPUT"
             echo "✅ Cache has content, will save"
             echo "   Size: $(numfmt --to=iec-i --suffix=B $((SIZE * 1024)) 2>/dev/null || echo "${SIZE} KB")"
             echo "   Files: $FILE_COUNT"
           else
-            echo "present=false" >> $GITHUB_OUTPUT
+            echo "present=false" >> "$GITHUB_OUTPUT"
             echo "⚠️ Cache is empty or too small"
             echo "   Size: ${SIZE} KB (minimum: ${MIN_SIZE} KB)"
             echo "   Files: ${FILE_COUNT} (minimum: ${MIN_FILES})"
@@ -623,22 +612,21 @@ jobs:
           PREBUILTS_DIR="${{ matrix.model }}/kernel_platform/prebuilts-master"
           
           if [ ! -d "$PREBUILTS_DIR" ]; then
-            echo "present=false" >> $GITHUB_OUTPUT
+            echo "present=false" >> "$GITHUB_OUTPUT"
             echo "⚠️ Prebuilts directory doesn't exist"
             exit 0
           fi
           
-          # Check if directory has any files
           FILE_COUNT=$(find "$PREBUILTS_DIR" -type f 2>/dev/null | head -1 | wc -l || echo "0")
           
           if [ "$FILE_COUNT" -gt 0 ]; then
-            echo "present=true" >> $GITHUB_OUTPUT
+            echo "present=true" >> "$GITHUB_OUTPUT"
             echo "✅ Prebuilts directory has content"
             
             SIZE=$(du -sh "$PREBUILTS_DIR" 2>/dev/null | awk '{print $1}' || echo "N/A")
             echo "   Size: $SIZE"
           else
-            echo "present=false" >> $GITHUB_OUTPUT
+            echo "present=false" >> "$GITHUB_OUTPUT"
             echo "⚠️ Prebuilts directory is empty"
           fi
 
@@ -647,7 +635,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ${{ steps.cache-keys.outputs.ccache_key }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: ${{ steps.cache-keys.outputs.ccache_key }}
 
       - name: Save Prebuilts Cache
         if: always() && steps.prebuilts-present.outputs.present == 'true' && steps.cache-prebuilts-restore.outputs.cache-hit != 'true'
@@ -852,339 +840,114 @@ jobs:
             echo "New tag: $NEW_TAG"
           fi
           
-          echo "NEW_TAG=$NEW_TAG" >> $GITHUB_ENV
+          echo "NEW_TAG=$NEW_TAG" >> "$GITHUB_ENV"
           echo "📌 Tag to be created: $NEW_TAG"
           
           if [[ "$NEW_TAG" =~ (alpha|beta|rc|test|dev|pre) ]]; then
-            echo "IS_PRERELEASE=true" >> $GITHUB_ENV
+            echo "IS_PRERELEASE=true" >> "$GITHUB_ENV"
             echo "🔬 Detected as prerelease"
           else
-            echo "IS_PRERELEASE=false" >> $GITHUB_ENV
+            echo "IS_PRERELEASE=false" >> "$GITHUB_ENV"
             echo "🎯 Detected as stable release"
           fi
   
       - name: Organize Assets
         shell: bash
         run: |
-          #!/usr/bin/env bash
           set -euo pipefail
           
           echo "::group::Organizing Artifacts"
           
-          # ============================================
-          # HELPER FUNCTIONS
-          # ============================================
-          
-          log_error() {
-              echo "::error::$1"
-              exit 1
-          }
-          
-          log_warning() {
-              echo "::warning::$1"
-          }
-          
-          # Enhanced safe_filename with guaranteed non-empty output
-          safe_filename() {
-              local filename="$1"
-              local out
-              
-              # Remove unsafe characters, trim leading/trailing dots/dashes
-              out="$(echo "$filename" | tr -cs '[:alnum:]._-' '_' | sed -E 's/^[._-]+|[._-]+$//g' | cut -c1-255)"
-              
-              # Guarantee non-empty result
-              if [ -z "$out" ]; then
-                  out="artifact"
-              fi
-              
-              printf '%s\n' "$out"
-          }
-          
-          # Helper: Split filename into base and extension safely
-          split_filename() {
-              local fname="$1"
-              local base ext
-              
-              # Check if filename contains a dot (and it's not a hidden file starting with dot)
-              if [[ "$fname" == *.* ]] && [[ "$fname" != .* ]]; then
-                  base="${fname%.*}"
-                  ext="${fname##*.}"
-                  
-                  # Ensure extension is not the same as base (no-dot case)
-                  if [ "$ext" = "$base" ]; then
-                      base="$fname"
-                      ext=""
-                  fi
-              else
-                  base="$fname"
-                  ext=""
-              fi
-              
-              printf '%s\n%s\n' "$base" "$ext"
-          }
-          
-          log_file_processing() {
-              local type="$1"
-              local filename="$2"
-              local dest="$3"
-              echo "[${type^^}] Processing: $filename -> $(basename "$dest")"
-          }
-          
-          # ============================================
-          # PRE-FLIGHT CHECKS
-          # ============================================
-          
-          mkdir -p ./all-artifacts ./release-assets || log_error "Failed to create directories"
-          [ -d ./all-artifacts ] || log_error "all-artifacts directory does not exist"
-          
-          # Normalize permissions
-          chmod -R u+rwX ./release-assets 2>/dev/null || true
-          
-          # Ensure release-assets is writable
-          touch ./release-assets/.write-test 2>/dev/null && rm -f ./release-assets/.write-test || \
-              log_error "Directory ./release-assets is not writable"
-          
-          # Verify find and sort are available
-          command -v find >/dev/null 2>&1 || log_error "find command not found"
-          command -v sort >/dev/null 2>&1 || log_error "sort command not found"
-          
-          # Count total files to process
-          total_zips=$(find ./all-artifacts -type f -name "*.zip" 2>/dev/null | wc -l)
-          total_infos=$(find ./all-artifacts -type f -name "build_info.txt" 2>/dev/null | wc -l)
-          total_files=$((total_zips + total_infos))
-          
-          echo "📊 Total files to process: $total_files (${total_zips} ZIPs, ${total_infos} build_info.txt)"
-          
-          if [ "$total_files" -eq 0 ]; then
-              log_error "No artifacts found to process!"
-          fi
-          
-          echo ""
+          mkdir -p ./release-assets
           
           declare -i zip_count=0
           declare -i info_count=0
-          declare -i skipped_count=0
           
           # ============================================
-          # PROCESS ZIP FILES
+          # PROCESS ZIP FILES (deterministic naming)
           # ============================================
           
           while IFS= read -r -d '' zip; do
-              [ -f "$zip" ] && [ -r "$zip" ] || { log_warning "Skipping unreadable zip file: $zip"; continue; }
-          
-              filename=$(basename -- "$zip")
-              safe_name=$(safe_filename "$filename")
-              
-              # Fallback for empty sanitized name
-              if [ -z "$safe_name" ]; then
-                  safe_name="artifact_$(date +%s).zip"
-                  log_warning "Empty filename after sanitization, using fallback: $safe_name"
-              fi
-              
-              dest="./release-assets/$safe_name"
-              
-              # Initial collision avoidance
-              counter=1
-              while [ -e "$dest" ]; do
-                  read -r base ext < <(split_filename "$safe_name")
-                  if [ -n "$ext" ]; then
-                      dest="./release-assets/${base}_${counter}.${ext}"
-                  else
-                      dest="./release-assets/${safe_name}_${counter}"
-                  fi
-                  ((counter++))
-              done
-          
-              # === SOFT CAP: Truncate if path > 200 chars ===
-              if [ ${#dest} -gt 200 ]; then
-                  read -r base ext < <(split_filename "$safe_name")
-                  
-                  # Truncate base to 150 chars
-                  base="${base:0:150}"
-                  
-                  # Reconstruct filename
-                  if [ -n "$ext" ]; then
-                      safe_name="${base}.${ext}"
-                  else
-                      safe_name="$base"
-                  fi
-                  
-                  dest="./release-assets/$safe_name"
-                  log_warning "Path too long (${#dest} chars), truncated to: $(basename "$dest")"
-                  
-                  # Re-check for collisions after truncation
-                  counter=1
-                  while [ -e "$dest" ]; do
-                      if [ -n "$ext" ]; then
-                          dest="./release-assets/${base}_${counter}.${ext}"
-                      else
-                          dest="./release-assets/${base}_${counter}"
-                      fi
-                      ((counter++))
-                  done
-              fi
-          
-              # === HARD CAP: Last-resort shortening if still > 260 chars ===
-              if [ ${#dest} -gt 260 ]; then
-                  short="artifact_$(date +%s%N | cut -c1-13)"
-                  dest="./release-assets/${short}.zip"
-                  log_warning "Destination path exceeded hard limit (${#dest} chars); forced name: $(basename "$dest")"
-                  
-                  # Ensure uniqueness for forced name
-                  counter=1
-                  while [ -e "$dest" ]; do
-                      dest="./release-assets/${short}_${counter}.zip"
-                      ((counter++))
-                  done
-              fi
-          
-              # === COPY WITH VALIDATION ===
-              if ! cp -v "$zip" "$dest"; then
-                  log_warning "Failed to copy ZIP (skipping): $zip → $dest"
-                  ((skipped_count++))
-                  continue
-              fi
-              
-              # Verify destination exists and has content
-              if [ ! -f "$dest" ] || [ ! -s "$dest" ]; then
-                  log_warning "Destination file missing/empty after copy (skipping): $dest"
-                  rm -f "$dest" 2>/dev/null || true  # Clean up partial file
-                  ((skipped_count++))
-                  continue
-              fi
-          
-              log_file_processing "zip" "$filename" "$dest"
-              ((zip_count++))
-          
-          done < <(LC_ALL=C find ./all-artifacts -type f -name "*.zip" -print0 2>/dev/null | LC_ALL=C sort -z)
+            [ -f "$zip" ] && [ -r "$zip" ] || continue
+            
+            filename=$(basename -- "$zip")
+            
+            # Extract model from filename (assumes format: <model>_<version>_...zip)
+            model=$(echo "$filename" | sed -E 's/^([^_]+)_.*/\1/' | tr -cd '[:alnum:]-')
+            
+            # Fallback if extraction fails
+            if [ -z "$model" ]; then
+              model="device_$(printf '%s' "$filename" | sha256sum | cut -c1-8)"
+            fi
+            
+            # Create deterministic name: <model>_kernel.zip
+            dest="./release-assets/${model}_kernel.zip"
+            
+            # Handle collisions with counter
+            counter=1
+            while [ -e "$dest" ]; do
+              dest="./release-assets/${model}_kernel_${counter}.zip"
+              ((counter++))
+            done
+            
+            cp -v "$zip" "$dest" || continue
+            
+            echo "[ZIP] $filename -> $(basename "$dest")"
+            ((zip_count++))
+            
+          done < <(find ./all-artifacts -type f -name "*.zip" -print0 2>/dev/null | sort -z)
           
           # ============================================
           # PROCESS BUILD INFO FILES
           # ============================================
           
           while IFS= read -r -d '' info; do
-              [ -s "$info" ] && [ -r "$info" ] || { log_warning "Skipping empty/unreadable build info: $info"; continue; }
-              dos2unix -q "$info" 2>/dev/null || true
-          
-              artifact_dir=$(dirname -- "$info")
-              dir_name=$(basename -- "$artifact_dir")
-          
-              # Extract model name with fallback chain
-              model=""
-              extraction_patterns=(
-                  '^kernel-(.+)-android([0-9]+)-([0-9.]+)$'
-                  '^kernel-(.+)-android([0-9]+)$'
-                  '^kernel-(.+)$'
-              )
-              for pattern in "${extraction_patterns[@]}"; do
-                  if [[ "$dir_name" =~ $pattern ]]; then
-                      model="${BASH_REMATCH[1]}"
-                      break
-                  fi
-              done
-              
-              # Fallback: extract from file content
-              if [ -z "$model" ]; then
-                  model=$(grep -m1 '^Model:' "$info" 2>/dev/null | cut -d: -f2- | xargs | tr -s '[:space:]' '_' | tr -cd '[:alnum:]_.-' || true)
-              fi
-              
-              # Sanitize and limit length
-              model=$(safe_filename "${model:-unknown}" | cut -c1-100)
-              
-              # Guarantee non-empty model
-              if [ -z "$model" ] || [ "$model" = "unknown" ]; then
-                  model="unknown_$(date +%s)"
-                  log_warning "Could not extract model from: $dir_name; using fallback: $model"
-              fi
-          
-              dest="./release-assets/build_info_${model}.txt"
-              
-              # Collision avoidance
-              counter=1
-              while [ -e "$dest" ]; do
-                  dest="./release-assets/build_info_${model}_${counter}.txt"
-                  ((counter++))
-              done
-          
-              # === SOFT CAP: Truncate if path > 200 chars ===
-              if [ ${#dest} -gt 200 ]; then
-                  model="${model:0:80}"  # Truncate model name
-                  dest="./release-assets/build_info_${model}.txt"
-                  log_warning "Path too long, truncated model to: $model"
-                  
-                  # Re-check for collisions
-                  counter=1
-                  while [ -e "$dest" ]; do
-                      dest="./release-assets/build_info_${model}_${counter}.txt"
-                      ((counter++))
-                  done
-              fi
-          
-              # === HARD CAP: Last-resort shortening ===
-              if [ ${#dest} -gt 260 ]; then
-                  short="info_$(date +%s%N | cut -c1-13)"
-                  dest="./release-assets/${short}.txt"
-                  log_warning "Destination path exceeded hard limit; forced name: $(basename "$dest")"
-                  
-                  counter=1
-                  while [ -e "$dest" ]; do
-                      dest="./release-assets/${short}_${counter}.txt"
-                      ((counter++))
-                  done
-              fi
-          
-              # === COPY WITH VALIDATION ===
-              if ! cp -v "$info" "$dest"; then
-                  log_warning "Failed to copy build info (skipping): $info → $dest"
-                  ((skipped_count++))
-                  continue
-              fi
-              
-              # Verify destination exists
-              if [ ! -f "$dest" ]; then
-                  log_warning "Destination file missing after copy (skipping): $dest"
-                  rm -f "$dest" 2>/dev/null || true
-                  ((skipped_count++))
-                  continue
-              fi
-          
-              log_file_processing "info" "$info" "$dest"
-              ((info_count++))
-          
-          done < <(LC_ALL=C find ./all-artifacts -type f -name "build_info.txt" -print0 2>/dev/null | LC_ALL=C sort -z)
+            [ -s "$info" ] && [ -r "$info" ] || continue
+            
+            artifact_dir=$(dirname -- "$info")
+            dir_name=$(basename -- "$artifact_dir")
+            
+            # Extract model from directory name
+            if [[ "$dir_name" =~ ^kernel-(.+)-android ]]; then
+              model="${BASH_REMATCH[1]}"
+            else
+              model=$(basename "$artifact_dir" | tr -cd '[:alnum:]-' | cut -c1-50)
+            fi
+            
+            # Fallback
+            if [ -z "$model" ]; then
+              model="unknown_$(date +%s)"
+            fi
+            
+            dest="./release-assets/build_info_${model}.txt"
+            
+            counter=1
+            while [ -e "$dest" ]; do
+              dest="./release-assets/build_info_${model}_${counter}.txt"
+              ((counter++))
+            done
+            
+            dos2unix -q "$info" 2>/dev/null || true
+            cp -v "$info" "$dest" || continue
+            
+            echo "[INFO] $(basename "$info") -> $(basename "$dest")"
+            ((info_count++))
+            
+          done < <(find ./all-artifacts -type f -name "build_info.txt" -print0 2>/dev/null | sort -z)
           
           echo "::endgroup::"
           
-          # ============================================
-          # FINAL SUMMARY
-          # ============================================
-          
           echo ""
-          echo "═══════════════════════════════════════════════════════════════"
-          echo "📊 ORGANIZATION SUMMARY"
-          echo "═══════════════════════════════════════════════════════════════"
-          echo "✅ ZIP files processed:        $zip_count"
-          echo "📄 Build info files processed:  $info_count"
-          echo "⚠️  Files skipped (errors):     $skipped_count"
-          echo "═══════════════════════════════════════════════════════════════"
+          echo "📊 Summary: $zip_count ZIPs, $info_count build_info files"
           
-          # Fail if no files were successfully processed
           if [ "$zip_count" -eq 0 ] && [ "$info_count" -eq 0 ]; then
-              log_error "No files were successfully processed! Check logs above for errors."
+            echo "::error::No files were processed!"
+            exit 1
           fi
           
-          # Warn if some files were skipped
-          if [ "$skipped_count" -gt 0 ]; then
-              log_warning "$skipped_count file(s) were skipped due to errors"
-          fi
-          
-          # List final contents
           echo ""
-          echo "📦 Final release assets:"
-          ls -lh ./release-assets/ || log_error "Failed to list release assets"
-          
-          echo ""
-          echo "✅ Asset organization completed successfully!"
+          echo "📦 Final assets:"
+          ls -lh ./release-assets/
   
       - name: Generate Release Notes
         shell: bash
@@ -1457,3 +1220,4 @@ jobs:
           | Optimization | `${{ inputs.optimize_level }}` |
           
           **Legend:** ✅ = SUSFS module included | ⚠️ = SUSFS module missing
+          EOF
