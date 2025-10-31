@@ -14,8 +14,7 @@ on:
         default: false
       op_model:
         description: 'Select kernels to build'
-        required: true
-       极 choice
+        required: true       
         options:
           - ALL
           - android15-6.6
@@ -66,7 +65,7 @@ on:
         description: 'Enable ZRAM algorithms'
         required: false
         type: boolean
-        default极 false
+        default: false
       optimize_level:
         description: 'Optimization level'
         required: false
