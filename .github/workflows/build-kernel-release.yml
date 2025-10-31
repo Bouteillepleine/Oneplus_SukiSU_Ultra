@@ -843,7 +843,7 @@ jobs:
             fi
             
             # Use faster unzip -Z1 for large ZIPs
-            if unzip -Z1 "$zip" 2>/dev/null | grep -qm1 "ksu_module_susfs"; then
+            if unzip -1 "$zip" 2>/dev/null | grep -qm1 "ksu_module_susfs"; then
               status="✅"
             else
               status="⚠️"
@@ -1085,7 +1085,7 @@ jobs:
                   size_bytes=$(stat -c%s "$f" 2>/dev/null || echo "0")
                   size_mb=$((size_bytes / 1048576))
                   
-                  if unzip -Z1 "$f" 2>/dev/null | grep -qm1 "ksu_module_susfs"; then
+                  if unzip -1 "$f" 2>/dev/null | grep -qm1 "ksu_module_susfs"; then
                     status_icon="✅"
                   else
                     status_icon="⚠️"
