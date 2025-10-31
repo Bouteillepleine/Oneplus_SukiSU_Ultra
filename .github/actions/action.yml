@@ -62,11 +62,16 @@ runs:
       run: |
         set -euo pipefail
         
-        # Ensure jq is available before use
+        # ============================================
+        # PATCH: Ensure jq is available before use
+        # ============================================
         if ! command -v jq >/dev/null 2>&1; then
           echo "Installing jq..."
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jq
+          echo "✅ jq installed: $(jq --version)"
+        else
+          echo "✅ jq already available: $(jq --version)"
         fi
         
         # Write JSON to file safely
@@ -280,7 +285,7 @@ runs:
       run: |
         echo "CCACHE_DIR=$HOME/.ccache_${{ env.CONFIG }}" >> "$GITHUB_ENV"
         echo "CCACHE_MAXSIZE=5G" >> "$GITHUB_ENV"
-        mkdir -p "$HOME/.ccache_${{ env.CONFIG }}"
+        mkdir -p "$HOME/.ccache_${{ env.CONFIG }}"   
 
     - name: Initialize and Sync Kernel Source
       shell: bash
@@ -337,7 +342,7 @@ runs:
             break
           fi
           echo "⚠️ repo sync attempt $i failed; retrying..."
-          sleep 30
+          sleep $(( 15 * i ))
         done
         
         $success || { echo "::error::repo sync failed after 3 attempts"; exit 1; }
@@ -439,6 +444,26 @@ runs:
           echo "ccache cache hit details:"
           ccache -sv || true
         fi
+
+    - name: Persist ccache config
+      shell: bash
+      run: |
+        set -euo pipefail
+        CCACHE_DIR="${{ env.CCACHE_DIR }}"
+        mkdir -p "$CCACHE_DIR"
+        cat > "$CCACHE_DIR/ccache.conf" <<EOF
+        max_size = ${{ env.CCACHE_MAXSIZE }}
+        compiler_check = content
+        sloppiness = file_macro,time_macros,include_file_mtime,include_file_ctime
+        hash_dir = false
+        compression = true
+        compression_level = 1
+        hard_link = true
+        EOF
+        echo "✅ Wrote $CCACHE_DIR/ccache.conf"
+        echo ""
+        echo "Active ccache configuration:"
+        ccache -p | grep -E '^(max_size|compiler_check|sloppiness|hash_dir|compression|hard_link)' || true
 
     - name: Clone AnyKernel3 and Other Dependencies
       shell: bash
@@ -1187,7 +1212,7 @@ runs:
         echo "✅ Build Completed Successfully"
         echo "============================================"
         echo "Duration: $((BUILD_TIME / 60))m $((BUILD_TIME % 60))s"
-        echo "Image Size: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")"
+        echo "Image Size: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE" 2>/dev/null || echo "${IMG_SIZE} B")"
         echo "============================================"
         echo "::endgroup::"
 
@@ -1243,13 +1268,13 @@ runs:
           exit 1
         fi
         
-        if ! file "$IMG" | grep -qi 'ARM64'; then
-          echo "::error::Image is not ARM64 format"
+        if ! file "$IMG" | grep -Eqi 'ARM64|aarch64'; then
+          echo "::error::Image is not ARM64/aarch64 format"
           file "$IMG"
           exit 1
         fi
         
-                IMG_SIZE=$(stat -c%s "$IMG" 2>/dev/null || echo "0")
+        IMG_SIZE=$(stat -c%s "$IMG" 2>/dev/null || echo "0")
         if ! [[ "$IMG_SIZE" =~ ^[0-9]+$ ]] || [ "$IMG_SIZE" -lt 10485760 ]; then
           echo "::error::Image size ($IMG_SIZE bytes) is suspiciously small (< 10MB)"
           exit 1
@@ -1265,7 +1290,7 @@ runs:
         
         echo "✅ Build validation passed"
         echo "   Warnings: $WARNINGS_COUNT"
-        echo "   Image Size: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")"
+        echo "   Image Size: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE" 2>/dev/null || echo "${IMG_SIZE} B")"
         echo "   SHA256: $IMAGE_SHA256"
 
     - name: Download SUSFS Module from CI
@@ -1422,7 +1447,7 @@ runs:
         
         echo "✅ ZIP created successfully"
         echo "   Name: $ZIP_NAME"
-        echo "   Size: $(numfmt --to=iec-i --suffix=B "$ZIP_SIZE")"
+        echo "   Size: $(numfmt --to=iec-i --suffix=B "$ZIP_SIZE" 2>/dev/null || echo "$ZIP_SIZE")"
         echo "   SHA256: $ZIP_SHA256"
         echo "   SUSFS Module: $([ "$SUSFS_FOUND" = true ] && echo "✅ Included" || echo "❌ Not included")"
         echo "::endgroup::"
@@ -1581,7 +1606,7 @@ runs:
         if [ -n "${ZIP_NAME:-}" ]; then
           echo "- **ZIP Name:** \`${ZIP_NAME}\`" >> $GITHUB_STEP_SUMMARY
           if [ -n "${ZIP_SIZE:-}" ]; then
-            echo "- **ZIP Size:** $(numfmt --to=iec-i --suffix=B "${ZIP_SIZE}")" >> $GITHUB_STEP_SUMMARY
+            echo "- **ZIP Size:** $(numfmt --to=iec-i --suffix=B "${ZIP_SIZE}" 2>/dev/null || echo "${ZIP_SIZE}")" >> $GITHUB_STEP_SUMMARY
           fi
           if [ -n "${ZIP_SHA256:-}" ]; then
             echo "- **ZIP SHA256:** \`${ZIP_SHA256}\`" >> $GITHUB_STEP_SUMMARY
@@ -1612,3 +1637,4 @@ runs:
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "---" >> $GITHUB_STEP_SUMMARY
         echo "*Built with ❤️ using GitHub Actions*" >> $GITHUB_STEP_SUMMARY
+
