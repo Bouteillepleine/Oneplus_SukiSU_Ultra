@@ -806,84 +806,208 @@ jobs:
         run: |
           #!/usr/bin/env bash
           set -euo pipefail
-     
+          
           echo "::group::Organizing Artifacts"
-     
+          
+          # ============================================
+          # HELPER FUNCTIONS
+          # ============================================
+          
           log_error() {
               echo "::error::$1"
               exit 1
           }
-     
+          
           log_warning() {
               echo "::warning::$1"
           }
-     
-          # === PRE-CHECKS ===
-          mkdir -p ./all-artifacts ./release-assets || log_error "Failed to create directories"
-          [ -d ./all-artifacts ] || log_error "all-artifacts directory does not exist"
-     
-          # Ensure release-assets is writable
-          touch ./release-assets/.write-test 2>/dev/null && rm -f ./release-assets/.write-test || \
-              log_error "Directory ./release-assets is not writable"
-     
-          file_count=$(find ./all-artifacts -maxdepth 10 -type f \( -name "*.zip" -o -name "build_info.txt" \) 2>/dev/null | wc -l | tr -d '[:space:]') || file_count=0
-          [ "$file_count" -eq 0 ] && log_error "No artifacts found under ./all-artifacts"
-     
-          echo "Total files to process: $file_count"
-          echo ""
-     
-          declare -i zip_count=0
-          declare -i info_count=0
-          declare -i skipped_count=0
-     
+          
+          # Enhanced safe_filename with guaranteed non-empty output
           safe_filename() {
               local filename="$1"
-              echo "$filename" | tr -cs '[:alnum:]._-' '_' | sed -E 's/^[._-]+|[._-]+$//g' | cut -c1-255
+              local out
+              
+              # Remove unsafe characters, trim leading/trailing dots/dashes
+              out="$(echo "$filename" | tr -cs '[:alnum:]._-' '_' | sed -E 's/^[._-]+|[._-]+$//g' | cut -c1-255)"
+              
+              # Guarantee non-empty result
+              if [ -z "$out" ]; then
+                  out="artifact"
+              fi
+              
+              printf '%s\n' "$out"
           }
-     
+          
+          # Helper: Split filename into base and extension safely
+          split_filename() {
+              local fname="$1"
+              local base ext
+              
+              # Check if filename contains a dot (and it's not a hidden file starting with dot)
+              if [[ "$fname" == *.* ]] && [[ "$fname" != .* ]]; then
+                  base="${fname%.*}"
+                  ext="${fname##*.}"
+                  
+                  # Ensure extension is not the same as base (no-dot case)
+                  if [ "$ext" = "$base" ]; then
+                      base="$fname"
+                      ext=""
+                  fi
+              else
+                  base="$fname"
+                  ext=""
+              fi
+              
+              printf '%s\n%s\n' "$base" "$ext"
+          }
+          
           log_file_processing() {
               local type="$1"
               local filename="$2"
               local dest="$3"
               echo "[${type^^}] Processing: $filename -> $(basename "$dest")"
           }
-     
-          # === PROCESS ZIP FILES ===
+          
+          # ============================================
+          # PRE-FLIGHT CHECKS
+          # ============================================
+          
+          mkdir -p ./all-artifacts ./release-assets || log_error "Failed to create directories"
+          [ -d ./all-artifacts ] || log_error "all-artifacts directory does not exist"
+          
+          # Normalize permissions
+          chmod -R u+rwX ./release-assets 2>/dev/null || true
+          
+          # Ensure release-assets is writable
+          touch ./release-assets/.write-test 2>/dev/null && rm -f ./release-assets/.write-test || \
+              log_error "Directory ./release-assets is not writable"
+          
+          # Verify find and sort are available
+          command -v find >/dev/null 2>&1 || log_error "find command not found"
+          command -v sort >/dev/null 2>&1 || log_error "sort command not found"
+          
+          # Count total files to process
+          total_zips=$(find ./all-artifacts -type f -name "*.zip" 2>/dev/null | wc -l)
+          total_infos=$(find ./all-artifacts -type f -name "build_info.txt" 2>/dev/null | wc -l)
+          total_files=$((total_zips + total_infos))
+          
+          echo "📊 Total files to process: $total_files (${total_zips} ZIPs, ${total_infos} build_info.txt)"
+          
+          if [ "$total_files" -eq 0 ]; then
+              log_error "No artifacts found to process!"
+          fi
+          
+          echo ""
+          
+          declare -i zip_count=0
+          declare -i info_count=0
+          declare -i skipped_count=0
+          
+          # ============================================
+          # PROCESS ZIP FILES
+          # ============================================
+          
           while IFS= read -r -d '' zip; do
               [ -f "$zip" ] && [ -r "$zip" ] || { log_warning "Skipping unreadable zip file: $zip"; continue; }
-     
+          
               filename=$(basename -- "$zip")
               safe_name=$(safe_filename "$filename")
+              
+              # Fallback for empty sanitized name
+              if [ -z "$safe_name" ]; then
+                  safe_name="artifact_$(date +%s).zip"
+                  log_warning "Empty filename after sanitization, using fallback: $safe_name"
+              fi
+              
               dest="./release-assets/$safe_name"
+              
+              # Initial collision avoidance
               counter=1
               while [ -e "$dest" ]; do
-                  dest="./release-assets/${safe_name%.*}_${counter}.${safe_name##*.}"
+                  read -r base ext < <(split_filename "$safe_name")
+                  if [ -n "$ext" ]; then
+                      dest="./release-assets/${base}_${counter}.${ext}"
+                  else
+                      dest="./release-assets/${safe_name}_${counter}"
+                  fi
                   ((counter++))
               done
-     
-              # Check path length (GitHub Actions limit ~260 chars)
+          
+              # === SOFT CAP: Truncate if path > 200 chars ===
+              if [ ${#dest} -gt 200 ]; then
+                  read -r base ext < <(split_filename "$safe_name")
+                  
+                  # Truncate base to 150 chars
+                  base="${base:0:150}"
+                  
+                  # Reconstruct filename
+                  if [ -n "$ext" ]; then
+                      safe_name="${base}.${ext}"
+                  else
+                      safe_name="$base"
+                  fi
+                  
+                  dest="./release-assets/$safe_name"
+                  log_warning "Path too long (${#dest} chars), truncated to: $(basename "$dest")"
+                  
+                  # Re-check for collisions after truncation
+                  counter=1
+                  while [ -e "$dest" ]; do
+                      if [ -n "$ext" ]; then
+                          dest="./release-assets/${base}_${counter}.${ext}"
+                      else
+                          dest="./release-assets/${base}_${counter}"
+                      fi
+                      ((counter++))
+                  done
+              fi
+          
+              # === HARD CAP: Last-resort shortening if still > 260 chars ===
               if [ ${#dest} -gt 260 ]; then
-                  log_error "Destination path too long (${#dest} chars): $dest"
+                  short="artifact_$(date +%s%N | cut -c1-13)"
+                  dest="./release-assets/${short}.zip"
+                  log_warning "Destination path exceeded hard limit (${#dest} chars); forced name: $(basename "$dest")"
+                  
+                  # Ensure uniqueness for forced name
+                  counter=1
+                  while [ -e "$dest" ]; do
+                      dest="./release-assets/${short}_${counter}.zip"
+                      ((counter++))
+                  done
               fi
-     
-              # FAIL FAST: cp with error capture
-              if ! cp -v --preserve=mode,ownership "$zip" "$dest" 2>&1; then
-                  log_error "Failed to copy ZIP: $zip → $dest"
+          
+              # === COPY WITH VALIDATION ===
+              if ! cp -v "$zip" "$dest"; then
+                  log_warning "Failed to copy ZIP (skipping): $zip → $dest"
+                  ((skipped_count++))
+                  continue
               fi
-     
+              
+              # Verify destination exists and has content
+              if [ ! -f "$dest" ] || [ ! -s "$dest" ]; then
+                  log_warning "Destination file missing/empty after copy (skipping): $dest"
+                  rm -f "$dest" 2>/dev/null || true  # Clean up partial file
+                  ((skipped_count++))
+                  continue
+              fi
+          
               log_file_processing "zip" "$filename" "$dest"
               ((zip_count++))
-     
+          
           done < <(LC_ALL=C find ./all-artifacts -type f -name "*.zip" -print0 2>/dev/null | LC_ALL=C sort -z)
-     
-          # === PROCESS BUILD INFO FILES ===
+          
+          # ============================================
+          # PROCESS BUILD INFO FILES
+          # ============================================
+          
           while IFS= read -r -d '' info; do
               [ -s "$info" ] && [ -r "$info" ] || { log_warning "Skipping empty/unreadable build info: $info"; continue; }
               dos2unix -q "$info" 2>/dev/null || true
-     
+          
               artifact_dir=$(dirname -- "$info")
               dir_name=$(basename -- "$artifact_dir")
-     
+          
+              # Extract model name with fallback chain
               model=""
               extraction_patterns=(
                   '^kernel-(.+)-android([0-9]+)-([0-9.]+)$'
@@ -896,56 +1020,109 @@ jobs:
                       break
                   fi
               done
+              
+              # Fallback: extract from file content
               if [ -z "$model" ]; then
                   model=$(grep -m1 '^Model:' "$info" 2>/dev/null | cut -d: -f2- | xargs | tr -s '[:space:]' '_' | tr -cd '[:alnum:]_.-' || true)
               fi
+              
+              # Sanitize and limit length
               model=$(safe_filename "${model:-unknown}" | cut -c1-100)
-     
+              
+              # Guarantee non-empty model
+              if [ -z "$model" ] || [ "$model" = "unknown" ]; then
+                  model="unknown_$(date +%s)"
+                  log_warning "Could not extract model from: $dir_name; using fallback: $model"
+              fi
+          
               dest="./release-assets/build_info_${model}.txt"
+              
+              # Collision avoidance
               counter=1
               while [ -e "$dest" ]; do
                   dest="./release-assets/build_info_${model}_${counter}.txt"
                   ((counter++))
               done
-     
-              if ! cp -v --preserve=mode,ownership "$info" "$dest" 2>&1; then
-                  log_error "Failed to copy build info: $info → $dest"
+          
+              # === SOFT CAP: Truncate if path > 200 chars ===
+              if [ ${#dest} -gt 200 ]; then
+                  model="${model:0:80}"  # Truncate model name
+                  dest="./release-assets/build_info_${model}.txt"
+                  log_warning "Path too long, truncated model to: $model"
+                  
+                  # Re-check for collisions
+                  counter=1
+                  while [ -e "$dest" ]; do
+                      dest="./release-assets/build_info_${model}_${counter}.txt"
+                      ((counter++))
+                  done
               fi
-     
-              if [ -n "$model" ] && [ "$model" != "unknown" ]; then
-                  log_file_processing "info" "$info" "$dest"
-                  ((info_count++))
-              else
-                  log_warning "Could not parse model from: $dir_name; using fallback name"
+          
+              # === HARD CAP: Last-resort shortening ===
+              if [ ${#dest} -gt 260 ]; then
+                  short="info_$(date +%s%N | cut -c1-13)"
+                  dest="./release-assets/${short}.txt"
+                  log_warning "Destination path exceeded hard limit; forced name: $(basename "$dest")"
+                  
+                  counter=1
+                  while [ -e "$dest" ]; do
+                      dest="./release-assets/${short}_${counter}.txt"
+                      ((counter++))
+                  done
+              fi
+          
+              # === COPY WITH VALIDATION ===
+              if ! cp -v "$info" "$dest"; then
+                  log_warning "Failed to copy build info (skipping): $info → $dest"
                   ((skipped_count++))
+                  continue
               fi
-     
+              
+              # Verify destination exists
+              if [ ! -f "$dest" ]; then
+                  log_warning "Destination file missing after copy (skipping): $dest"
+                  rm -f "$dest" 2>/dev/null || true
+                  ((skipped_count++))
+                  continue
+              fi
+          
+              log_file_processing "info" "$info" "$dest"
+              ((info_count++))
+          
           done < <(LC_ALL=C find ./all-artifacts -type f -name "build_info.txt" -print0 2>/dev/null | LC_ALL=C sort -z)
-     
+          
           echo "::endgroup::"
-     
-          # === FINAL SUMMARY ===
+          
+          # ============================================
+          # FINAL SUMMARY
+          # ============================================
+          
           echo ""
-          echo "Release Assets Summary:"
-          ls -lh ./release-assets/ 2>/dev/null || echo "No files in release-assets/"
-     
-          if [ "$zip_count" -eq 0 ]; then
-              log_error "No kernel ZIPs were SUCCESSFULLY copied to release-assets!"
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "📊 ORGANIZATION SUMMARY"
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "✅ ZIP files processed:        $zip_count"
+          echo "📄 Build info files processed:  $info_count"
+          echo "⚠️  Files skipped (errors):     $skipped_count"
+          echo "═══════════════════════════════════════════════════════════════"
+          
+          # Fail if no files were successfully processed
+          if [ "$zip_count" -eq 0 ] && [ "$info_count" -eq 0 ]; then
+              log_error "No files were successfully processed! Check logs above for errors."
           fi
-     
-          total_info=$((info_count + skipped_count))
-          if [ "$total_info" -eq 0 ]; then
-              log_warning "No build_info files were processed!"
-          elif [ "$skipped_count" -gt 0 ]; then
-              echo "Organized $zip_count kernel ZIP(s) and $total_info build info file(s) ($skipped_count with fallback names)"
-          else
-              echo "Organized $zip_count kernel ZIP(s) and $info_count build info file(s)"
+          
+          # Warn if some files were skipped
+          if [ "$skipped_count" -gt 0 ]; then
+              log_warning "$skipped_count file(s) were skipped due to errors"
           fi
-     
+          
+          # List final contents
           echo ""
-          echo "Detailed File Breakdown:"
-          find ./release-assets -type f | awk -F. '{print $NF}' | sort | uniq -c
-          du -ch ./release-assets/* 2>/dev/null | sort -hr
+          echo "📦 Final release assets:"
+          ls -lh ./release-assets/ || log_error "Failed to list release assets"
+          
+          echo ""
+          echo "✅ Asset organization completed successfully!"
   
       - name: Generate Release Notes
         shell: bash
@@ -1218,4 +1395,3 @@ jobs:
           | Optimization | `${{ inputs.optimize_level }}` |
           
           **Legend:** ✅ = SUSFS module included | ⚠️ = SUSFS module missing
-          EOF
