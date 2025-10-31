@@ -1341,32 +1341,57 @@ runs:
         AK3_DIR="$GITHUB_WORKSPACE/AnyKernel3"
         cd "$AK3_DIR"
         
-        echo "Cleaning AnyKernel3 directory..."
-        
-        find . -maxdepth 1 -type f -name "*.zip" ! -name "ksu_module_susfs*.zip" -delete 2>/dev/null || true
-        
-        rm -rf modules/system/lib/modules/*.ko 2>/dev/null || true
-        
-        if [ "${SUSFS_MODULE_DOWNLOADED:-false}" = "true" ]; then
-          echo ""
-          echo "Checking for SUSFS module..."
-          if ls ksu_module_susfs*.zip 1> /dev/null 2>&1; then
-            echo "✅ SUSFS module preserved:"
-            mapfile -t susfs_list < <(ls -1 ksu_module_susfs*.zip 2>/dev/null || true)
-            if [ "${#susfs_list[@]}" -gt 0 ]; then
-              ls -lh "${susfs_list[@]}"
-            fi
-          else
-            echo "ℹ️ SUSFS module was downloaded but not found after cleaning (non-fatal)"
-          fi
-        fi
-        
-        echo ""
-        echo "Remaining files in AnyKernel3:"
+        echo "Current directory contents before cleaning:"
         ls -lah
         
+        echo ""
+        echo "Cleaning AnyKernel3 directory..."
+        
+        # Preserve SUSFS module if it exists
+        SUSFS_MODULE=""
+        if [ -f "ksu_module_susfs_1.5.2+_CI.zip" ]; then
+          SUSFS_MODULE="ksu_module_susfs_1.5.2+_CI.zip"
+          echo "✅ Found SUSFS module: $SUSFS_MODULE"
+          # Move to temp location for safety
+          mv "$SUSFS_MODULE" /tmp/susfs_backup.zip
+          echo "Temporarily moved SUSFS module to /tmp/"
+        fi
+        
+        # Clean all zip files (now safe since SUSFS is backed up)
+        echo "Removing old ZIP files..."
+        rm -f *.zip 2>/dev/null || true
+        
+        # Restore SUSFS module
+        if [ -n "$SUSFS_MODULE" ] && [ -f "/tmp/susfs_backup.zip" ]; then
+          mv /tmp/susfs_backup.zip "$SUSFS_MODULE"
+          echo "✅ Restored SUSFS module: $SUSFS_MODULE"
+        fi
+        
+        # Clean kernel modules
+        echo "Cleaning old kernel modules..."
+        rm -rf modules/system/lib/modules/*.ko 2>/dev/null || true
+        
+        echo ""
+        echo "Directory contents after cleaning:"
+        ls -lah
+        
+        # Verify SUSFS module and set environment variable
+        if [ "${susfs_module_downloaded:-false}" = "true" ]; then
+          echo ""
+          if [ -f "ksu_module_susfs_1.5.2+_CI.zip" ]; then
+            echo "✅ SUSFS module verified after cleaning:"
+            ls -lh ksu_module_susfs_1.5.2+_CI.zip
+            echo "susfs_module_present=true" >> "$GITHUB_ENV"
+          else
+            echo "⚠️ WARNING: SUSFS module was downloaded but is missing after cleaning!"
+            echo "susfs_module_present=false" >> "$GITHUB_ENV"
+          fi
+        else
+          echo "ℹ️ SUSFS module was not downloaded"
+          echo "susfs_module_present=false" >> "$GITHUB_ENV"
+        fi
+        
         echo "::endgroup::"
-        exit 0
 
     - name: Create Kernel ZIP
       id: create_zip
@@ -1396,19 +1421,28 @@ runs:
         
         cd "$AK3_DIR"
         
+        # Check for SUSFS module with explicit filename
+        SUSFS_FOUND=false
+        SUSFS_FILE=""
+        if [ -f "ksu_module_susfs_1.5.2+_CI.zip" ]; then
+          SUSFS_FOUND=true
+          SUSFS_FILE="ksu_module_susfs_1.5.2+_CI.zip"
+          echo "✅ SUSFS module found: $SUSFS_FILE"
+          ls -lh "$SUSFS_FILE"
+        else
+          echo "ℹ️ SUSFS module not found in AnyKernel3 directory"
+          echo "Directory contents:"
+          ls -lah
+        fi
+        
         KERNEL_VERSION="${KERNEL_FULL_VER}"
         SUKISU_VERSION="${SUKISUVER}"
         SUSFS_VERSION="${SUSVER}"
         HOOK_TYPE="${{ inputs.hook }}"
         OPTIMIZE="${{ inputs.optimize_level }}"
-        
         DEVICE_NAME="${OP_MODEL}"
         
-        SUSFS_FOUND=false
-        if ls ksu_module_susfs*.zip 1> /dev/null 2>&1; then
-          SUSFS_FOUND=true
-        fi
-        
+        # Create ZIP name based on SUSFS presence
         if [ "$SUSFS_FOUND" = true ]; then
           ZIP_NAME="${DEVICE_NAME}_${KERNEL_VERSION}_SukiSU-v${SUKISU_VERSION}_SUSFS-${SUSFS_VERSION}_${HOOK_TYPE}_${OPTIMIZE}_with-module.zip"
         else
@@ -1417,19 +1451,37 @@ runs:
         
         echo "Creating ZIP: $ZIP_NAME"
         
-        zip -r9 "$ZIP_NAME" \
-          META-INF/ \
-          tools/ \
-          anykernel.sh \
-          Image \
-          banner \
-          version \
-          $([ "$SUSFS_FOUND" = true ] && echo "ksu_module_susfs*.zip" || true) \
-          -x "*.git*" "*.md" "*.txt"
+        # Build file list
+        FILES_TO_ZIP=(
+          "META-INF/"
+          "tools/"
+          "anykernel.sh"
+          "Image"
+          "banner"
+          "version"
+        )
+        
+        # Add SUSFS module if present
+        if [ "$SUSFS_FOUND" = true ]; then
+          FILES_TO_ZIP+=("$SUSFS_FILE")
+          echo "Including SUSFS module in ZIP"
+        fi
+        
+        # Create ZIP
+        zip -r9 "$ZIP_NAME" "${FILES_TO_ZIP[@]}" -x "*.git*" "*.md" "*.txt"
         
         if [ ! -f "$ZIP_NAME" ]; then
           echo "::error::Failed to create ZIP file"
           exit 1
+        fi
+        
+        # Verify SUSFS module in ZIP
+        if [ "$SUSFS_FOUND" = true ]; then
+          if unzip -l "$ZIP_NAME" | grep -q "ksu_module_susfs"; then
+            echo "✅ SUSFS module confirmed in ZIP"
+          else
+            echo "⚠️ WARNING: SUSFS module not found in created ZIP!"
+          fi
         fi
         
         ZIP_SIZE=$(stat -c%s "$ZIP_NAME")
@@ -1440,6 +1492,7 @@ runs:
         echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
         echo "ZIP_SIZE=$ZIP_SIZE" >> "$GITHUB_ENV"
         echo "ZIP_SHA256=$ZIP_SHA256" >> "$GITHUB_ENV"
+        echo "SUSFS_IN_ZIP=$SUSFS_FOUND" >> "$GITHUB_ENV"
         
         echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
         echo "zip_size=$ZIP_SIZE" >> "$GITHUB_OUTPUT"
