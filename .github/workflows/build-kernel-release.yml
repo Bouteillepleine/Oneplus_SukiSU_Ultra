@@ -210,52 +210,114 @@ jobs:
           
           echo "::group::Generate Cache Keys"
           
-          # Validate matrix context availability
+          # ============================================
+          # CANONICAL JSON NORMALIZATION
+          # ============================================
+          
           MATRIX_JSON='${{ toJSON(matrix) }}'
+          
+          # Validate matrix context
           if [ "$MATRIX_JSON" = "null" ] || [ -z "$MATRIX_JSON" ]; then
-            echo "::warning::No matrix context available, using fallback"
-            CONFIG_HASH="nomat"
-          else
-            CONFIG_HASH=$(printf '%s' "$MATRIX_JSON" | sha256sum | cut -c1-8)
+            echo "::error::No matrix context available!"
+            exit 1
           fi
           
-          # Include build inputs in hash
+          # Canonicalize JSON (sorted keys, compact format, stable output)
+          CANONICAL_JSON=$(echo "$MATRIX_JSON" | jq -cS '.')
+          
+          if [ -z "$CANONICAL_JSON" ] || [ "$CANONICAL_JSON" = "null" ]; then
+            echo "::error::Failed to canonicalize matrix JSON!"
+            echo "Original JSON: $MATRIX_JSON"
+            exit 1
+          fi
+          
+          # Hash the canonical form (guaranteed stable)
+          CONFIG_HASH=$(printf '%s' "$CANONICAL_JSON" | sha256sum | cut -c1-8)
+          
+          echo "Matrix configuration:"
+          echo "$CANONICAL_JSON" | jq '.'
+          
+          # ============================================
+          # BUILD INPUTS HASH
+          # ============================================
+          
           INPUT_HASH=$(printf '%s-%s-%s-%s' \
             "${{ inputs.hook }}" \
             "${{ inputs.lsm }}" \
             "${{ inputs.enable_zram }}" \
             "${{ inputs.optimize_level }}" | sha256sum | cut -c1-8)
           
-          # Guard for clang version (may not be set yet in composite action)
-          if [ -n "${{ env.CLANG_VERSION }}" ]; then
-            CLANG_SHORT=$(echo "${{ env.CLANG_VERSION }}" | sha256sum | cut -c1-8)
+          # ============================================
+          # CLANG VERSION HANDLING
+          # ============================================
+          
+          # Option A: Use environment variable if set by previous step
+          if [ -n "${CLANG_VERSION:-}" ]; then
+            CLANG_SHORT=$(echo "$CLANG_VERSION" | sha256sum | cut -c1-8)
+            echo "Using pre-detected Clang version: $CLANG_VERSION"
+          
+          # Option B: Try to detect from config file
+          elif [ -f "configs/clang-version.txt" ]; then
+            CLANG_VERSION=$(cat configs/clang-version.txt | tr -d '[:space:]')
+            CLANG_SHORT=$(echo "$CLANG_VERSION" | sha256sum | cut -c1-8)
+            echo "Loaded Clang version from config: $CLANG_VERSION"
+            echo "CLANG_VERSION=$CLANG_VERSION" >> $GITHUB_ENV
+          
+          # Option C: Use cache version instead (manual bump strategy)
           else
-            CLANG_SHORT="noclang"
-            echo "::notice::CLANG_VERSION not set yet, using placeholder"
+            CACHE_VERSION="v1"  # Bump this when Clang updates
+            CLANG_SHORT="$CACHE_VERSION"
+            echo "::notice::Using manual cache version: $CACHE_VERSION (no Clang version available)"
           fi
           
-          # Construct cache keys
+          # ============================================
+          # CONSTRUCT CACHE KEYS
+          # ============================================
+          
+          # Ccache key (includes all variable factors)
           CCACHE_KEY="ccache-${{ matrix.model }}-${{ matrix.kernel_version }}-${{ matrix.android_version }}-${CONFIG_HASH}-${INPUT_HASH}-${CLANG_SHORT}"
           
-          # Prebuilts key (independent of clang/inputs)
+          # Prebuilts key (only depends on config file content)
           PREBUILTS_HASH="${{ hashFiles(format('configs/{0}.json', matrix.model)) }}"
+          
+          # Validate prebuilts hash
+          if [ -z "$PREBUILTS_HASH" ] || [ "$PREBUILTS_HASH" = "null" ]; then
+            echo "::error::Failed to compute prebuilts hash for ${{ matrix.model }}"
+            exit 1
+          fi
+          
           PREBUILTS_KEY="prebuilts-${{ matrix.model }}-${{ matrix.kernel_version }}-${PREBUILTS_HASH}"
+          
+          # ============================================
+          # EXPORT OUTPUTS
+          # ============================================
           
           echo "ccache_key=$CCACHE_KEY" >> $GITHUB_OUTPUT
           echo "prebuilts_key=$PREBUILTS_KEY" >> $GITHUB_OUTPUT
           
-          # Export ccache environment (consistent path)
+          # Export ccache environment
           CCACHE_DIR="$HOME/.ccache"
           echo "CCACHE_DIR=$CCACHE_DIR" >> $GITHUB_ENV
           echo "CCACHE_MAXSIZE=5G" >> $GITHUB_ENV
           
-          echo "Cache keys generated:"
-          echo "  Config Hash: $CONFIG_HASH"
+          # ============================================
+          # SUMMARY
+          # ============================================
+          
+          echo ""
+          echo "📊 Cache Key Components:"
+          echo "  Model: ${{ matrix.model }}"
+          echo "  Kernel: ${{ matrix.kernel_version }}"
+          echo "  Android: ${{ matrix.android_version }}"
+          echo "  Config Hash: $CONFIG_HASH (from canonical JSON)"
           echo "  Input Hash: $INPUT_HASH"
           echo "  Clang Token: $CLANG_SHORT"
-          echo "  Ccache Key: $CCACHE_KEY"
-          echo "  Prebuilts Key: $PREBUILTS_KEY"
-          echo "  Directory: $CCACHE_DIR"
+          echo ""
+          echo "🔑 Generated Keys:"
+          echo "  Ccache: $CCACHE_KEY"
+          echo "  Prebuilts: $PREBUILTS_KEY"
+          echo ""
+          echo "📁 Cache Directory: $CCACHE_DIR"
           
           echo "::endgroup::"
 
