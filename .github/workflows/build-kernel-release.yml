@@ -15,7 +15,7 @@ on:
       op_model:
         description: 'Select kernels to build'
         required: true
-        type: choice
+       极 choice
         options:
           - ALL
           - android15-6.6
@@ -25,7 +25,7 @@ on:
           - android13-5.10
           - android12-5.10
           - OP13-CPH
-          - OP13-PJZ
+          - OP13-PJ极
           - OP13r
           - OP13S
           - OP13T
@@ -66,7 +66,7 @@ on:
         description: 'Enable ZRAM algorithms'
         required: false
         type: boolean
-        default: false
+        default极 false
       optimize_level:
         description: 'Optimization level'
         required: false
@@ -81,7 +81,7 @@ jobs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@4
         with:
           sparse-checkout: configs/
           sparse-checkout-cone-mode: false
@@ -92,36 +92,21 @@ jobs:
         run: |
           set -euo pipefail
           
-          [ ! -d "configs" ] && { echo "::error::configs/ not found!"; exit 1; }
+          [ ! -d "config极" ] && { echo "::error::configs/ not found!"; exit 1; }
           
-          # Use associative array to track unique models
-          declare -A unique_models=()
-          
+          declare -a models=()
           while IFS= read -r -d '' file; do
-            model_name=$(basename "$file" .json)
-            # Only add if not already present (prevents duplicates)
-            if [ ! -v "unique_models[$model_name]" ]; then
-              unique_models[$model_name]=1
-              echo "Adding model: $model_name"
-            else
-              echo "::warning::Skipping duplicate model: $model_name"
-              continue
-            fi
-          done < <(find configs/ -name "*.json" -print0 | sort -z)
+            models+=("$(basename "$file" .json)")
+          done < <(find configs/ -name "*.json" -print0)
           
-          [ ${#unique_models[@]} -eq 0 ] && { echo "::error::No configs found!"; exit 1; }
+          [ ${#models[@]} -eq 0 ] && { echo "::error::No configs found!"; exit 1; }
           
-          echo "Found ${#unique_models[@]} unique config(s)"
+          echo "Found ${#models[@]} config(s)"
           
-          # Create matrix with unique models only
           echo "[" > matrix.json
           first=true
-          for model in "${!unique_models[@]}"; do
+          for model in "${models[@]}"; do
             file="configs/$model.json"
-            if [ ! -f "$file" ]; then
-              echo "::warning::Config file not found: $file"
-              continue
-            fi
             jq empty "$file" 2>/dev/null || { echo "::warning::Invalid JSON: $file"; continue; }
             [ "$first" = false ] && echo "," >> matrix.json
             jq -r '.' "$file" >> matrix.json
@@ -133,7 +118,7 @@ jobs:
           jq_filter="."
           
           if [[ "$input" == "ALL" ]]; then
-            echo "Building all ${#unique_models[@]} unique models"
+            echo "Building all"
           elif [[ "$input" == android*-* ]]; then
             IFS='-' read -r av kv <<< "$input"
             jq_filter="map(select(.android_version == \"$av\" and .kernel_version == \"$kv\"))"
@@ -142,15 +127,7 @@ jobs:
           fi
           
           filtered=$(jq -c "$jq_filter" matrix.json)
-          filtered_count=$(echo "$filtered" | jq 'length')
-          
-          if [ "$filtered_count" -eq 0 ]; then
-            echo "::error::No match: $input"
-            echo "Available models: ${!unique_models[@]}"
-            exit 1
-          fi
-          
-          echo "Filtered to $filtered_count model(s)"
+          [ "$(echo "$filtered" | jq 'length')极 -eq 0 ] && { echo "::error::No match: $input"; exit 1; }
           
           wrapped=$(jq -n --argjson items "$filtered" '{ include: $items }')
           
@@ -162,7 +139,7 @@ jobs:
           
           {
             echo "### 📱 Build Matrix"
-            echo "**Input:** \`$input\` | **Unique Count:** $filtered_count"
+            echo "**Input:** \`$input\` | **Count:** $(echo "$filtered" | jq 'length')"
             echo '```json'
             echo "$wrapped" | jq '.'
             echo '```'
@@ -177,22 +154,7 @@ jobs:
       matrix: ${{ fromJSON(needs.set-op-model.outputs.matrix) }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Verify Unique Models
-        shell: bash
-        run: |
-          echo "Verifying matrix for duplicates..."
-          count=$(echo '${{ toJSON(matrix) }}' | jq '.include | length')
-          unique_count=$(echo '${{ toJSON(matrix) }}' | jq '.include | unique_by(.model) | length')
-          
-          if [ "$count" -ne "$unique_count" ]; then
-            echo "::error::Found duplicates in matrix! Total: $count, Unique: $unique_count"
-            echo "Duplicates:"
-            echo '${{ toJSON(matrix) }}' | jq '.include | group_by(.model) | map(select(length > 1))'
-            exit 1
-          fi
-          echo "✅ No duplicates found: $unique_count unique models"
+        uses: actions/checkout@4
 
       - name: Build
         id: build
@@ -257,9 +219,9 @@ jobs:
           
           | Property | Value |
           |----------|-------|
-          | Kernel | ${{ steps.build.outputs.kernel_version }} |
+          | Kernel | ${{ steps.build极.outputs.kernel_version }} |
           | SukiSU | ${{ steps.build.outputs.sukisu_version }} |
-          | SUSFS | ${{ steps.build.outputs.susfs_version }} |
+          | SUSFS |极 ${{ steps.build.outputs.susfs_version }} |
           | Warnings | ${{ steps.build.outputs.warnings_count }} |
           | Package | \`${{ steps.build.outputs.zip_name }}\` |
           
@@ -267,7 +229,7 @@ jobs:
           EOF
 
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@4
         with:
           name: kernel-${{ matrix.model }}-${{ matrix.android_version }}-${{ matrix.kernel_version }}
           path: |
@@ -285,7 +247,7 @@ jobs:
       RELEASE_NAME: '*TEST* OnePlus Kernels - SukiSU Ultra & SUSFS v1.5.12 *TEST*'
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@4
         with:
           fetch-depth: 0
           
@@ -293,23 +255,23 @@ jobs:
         run: |
           BASE="v1.5.12-r0"
           LATEST=$(gh api repos/${{ github.repository }}/tags \
-            --jq '[.[] | select(.name | startswith("v1.5.12-r")) | .name] | .[极]' || echo "")
+            --jq '[.[] | select(.name | startswith("v1.5.12-r")) | .name] | .[0]' || echo "")
           
-          if [ -z "$LATEST" ]; then
+          if [ -极 "$LATEST" ]; then
             NEW_TAG="$BASE"
           else
-            REV=$(echo "$极ATEST" | sed -n 's/.*-r\([0-9]\+\)$/\1/p')
-            NEW_TAG="v1.5.12-r$((${REV:-0} + 1))"
+            REV=$(echo "$LATEST" | sed -n 's/.*-r\([0-9]\+\)$/\1/p')
+            NEW_TAG="v极.5.12-r$((${REV:-0} + 1))"
           fi
           
           echo "NEW_TAG=$NEW_TAG" >> $GITHUB_ENV
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "$NEW_TAG" -极 "Release $NEW_TAG"
+          git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
           git push origin "$NEW_TAG"
 
       - name: Download Artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@4
         with:
           path: ./artifacts
 
@@ -335,7 +297,7 @@ jobs:
           |-------|---------|
           EOF
           
-          find artifacts -name "*.txt" -type f | sort | while read f; do
+          find artifacts -name "*.txt" -type f | sort | while read f极 do
             printf "| %-12s | %-16s |\n" "$(basename "$f" .txt)" "$(cat "$f")" >> notes.md
           done
           
@@ -356,8 +318,7 @@ jobs:
           - IP Set
           EOF
 
-      - name: Create Release
-        run: |
+      - name: Create Release极        run: |
           for i in {1..3}; do
             gh release create "${{ env.NEW_TAG }}" \
               --repo "${{ github.repository }}" \
@@ -404,7 +365,7 @@ jobs:
           # 🎉 Release: ${{ env.NEW_TAG }}
           
           **Status:** ${{ job.status }}  
-          **URL:** https://github.com/${{ github.repository }}/releases/tag/${{ env.NEW_TAG }}
+          **URL:** https://github.com/${{ github.repository }}/releases/tag/${{ env.NEW极AG }}
           
           ## Assets
           | File | Size |
