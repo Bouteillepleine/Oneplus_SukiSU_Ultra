@@ -89,6 +89,21 @@ jobs:
           sparse-checkout: configs/
           sparse-checkout-cone-mode: false
 
+      # ============================================
+      # PATCH 1: Ensure jq is installed
+      # ============================================
+      - name: Ensure jq
+        shell: bash
+        run: |
+          if ! command -v jq >/dev/null 2>&1; then
+            echo "Installing jq..."
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq jq
+            echo "✅ jq installed: $(jq --version)"
+          else
+            echo "✅ jq already available: $(jq --version)"
+          fi
+
       - name: Setup Matrix
         id: set-matrix
         shell: bash
@@ -258,10 +273,10 @@ jobs:
             "${{ inputs.optimize_level }}" | sha256sum | cut -c1-8)
           
           # ============================================
-          # CACHE VERSION (bump when toolchain changes)
+          # PATCH 2: Bump cache version to v3
           # ============================================
           
-          CACHE_VERSION="v2"
+          CACHE_VERSION="v3"  # Bumped from v2 - invalidates old caches
           
           # ============================================
           # CONSTRUCT CACHE KEYS
@@ -389,6 +404,44 @@ jobs:
           fi
           
           echo "::endgroup::"
+
+      # ============================================
+      # PATCH 3: Persist Ccache Config
+      # ============================================
+      - name: Persist Ccache Config
+        shell: bash
+        env:
+          CCACHE_MAXSIZE: ${{ env.CCACHE_MAXSIZE }}
+        run: |
+          set -euo pipefail
+          
+          CCACHE_DIR="${{ env.CCACHE_DIR }}"
+          mkdir -p "$CCACHE_DIR"
+          
+          # Write persistent config file
+          cat > "$CCACHE_DIR/ccache.conf" <<EOF
+          max_size = ${CCACHE_MAXSIZE}
+          compiler_check = content
+          sloppiness = file_macro,time_macros,include_file_mtime,include_file_ctime
+          hash_dir = false
+          compression = true
+          compression_level = 1
+          hard_link = true
+          EOF
+          
+          echo "✅ Wrote $CCACHE_DIR/ccache.conf with max_size=${CCACHE_MAXSIZE}"
+          
+          # Verify the file was written correctly
+          echo ""
+          echo "Config file contents:"
+          cat "$CCACHE_DIR/ccache.conf"
+          
+          # Show effective config (key fields only)
+          if command -v ccache >/dev/null 2>&1; then
+            echo ""
+            echo "Effective configuration:"
+            ccache -p | grep -E '^(max_size|compiler_check|sloppiness|hash_dir|compression|hard_link)' || true
+          fi
 
       - name: Restore Prebuilts Cache
         id: cache-prebuilts-restore
