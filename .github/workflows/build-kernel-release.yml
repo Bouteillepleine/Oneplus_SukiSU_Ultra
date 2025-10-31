@@ -577,7 +577,7 @@ jobs:
         with:
           name: kernel-${{ matrix.model }}-${{ matrix.android_version }}-${{ matrix.kernel_version }}
           path: ${{ matrix.model }}/artifacts/${{ steps.build.outputs.zip_name }}
-          retention-days: 7
+          retention-days: 14
           compression-level: 0
           if-no-files-found: error
 
@@ -598,6 +598,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     if: ${{ inputs.make_release }}
+    concurrency:
+      group: release-${{ github.repository }}-${{ github.ref_name }}
+      cancel-in-progress: false
     permissions:
       contents: write
     env:
@@ -661,11 +664,19 @@ jobs:
             echo "has_assets=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Check gh CLI
+      - name: Ensure gh CLI
         if: steps.organize.outputs.has_assets == 'true'
         shell: bash
         run: |
-          gh --version || { echo "::error::GitHub CLI (gh) not found on runner"; exit 1; }
+          if ! command -v gh >/dev/null 2>&1; then
+            echo "Installing GitHub CLI..."
+            type -p curl >/dev/null || sudo apt-get update -qq
+            curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+            sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+            sudo apt-get update -qq && sudo apt-get install -y -qq gh
+          fi
+          gh --version
 
       - name: Generate Tag
         if: steps.organize.outputs.has_assets == 'true'
@@ -676,24 +687,24 @@ jobs:
           BASE_VERSION="v1.5.2"
           
           echo "::group::Fetching existing releases"
+          # Filter non-numeric revisions at source
           LATEST=$(gh release list \
             --repo "${{ github.repository }}" \
             --limit 300 \
             --json tagName \
-            --jq '[.[] | select(.tagName | startswith("'"$BASE_VERSION"'-r")) | .tagName] | sort_by(split("-r")[1] | tonumber) | .[-1]' \
+            --jq '[.[] | .tagName | select(startswith("'"$BASE_VERSION"'-r")) | select(split("-r")[1] | test("^[0-9]+$"))] | sort_by(split("-r")[1] | tonumber) | .[-1]' \
             2>/dev/null || echo "")
           echo "::endgroup::"
           
           if [ -z "$LATEST" ]; then
-            NEW_TAG="${BASE_VERSION}-r0"
-            echo "No existing tags found, starting with: $NEW_TAG"
+            REV=-1
           else
-            REV=$(echo "$LATEST" | sed -n 's/.*-r\([0-9]\+\)$/\1/p')
-            [ -z "$REV" ] && { echo "::error::Failed to parse revision from: $LATEST"; exit 1; }
-            NEW_TAG="${BASE_VERSION}-r$((REV + 1))"
-            echo "Latest tag: $LATEST (rev $REV)"
-            echo "New tag: $NEW_TAG"
+            REV="${LATEST##*-r}"
           fi
+          
+          NEW_TAG="${BASE_VERSION}-r$((REV + 1))"
+          echo "Latest tag: ${LATEST:-none} (rev ${REV})"
+          echo "New tag: $NEW_TAG"
           
           # Export to both env and outputs
           echo "NEW_TAG=$NEW_TAG" >> "$GITHUB_ENV"
@@ -712,6 +723,23 @@ jobs:
           
           echo "Tag to be created: $NEW_TAG"
           echo "Prerelease: $IS_PRERELEASE"
+
+      - name: Generate Checksums
+        if: steps.organize.outputs.has_assets == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "::group::Generating SHA256 checksums"
+          cd release-assets
+          if ls *.zip >/dev/null 2>&1; then
+            sha256sum *.zip > SHA256SUMS
+            echo "Generated checksums:"
+            cat SHA256SUMS
+          else
+            echo "::warning::No ZIP files found for checksum generation"
+          fi
+          cd ..
+          echo "::endgroup::"
 
       - name: Generate Release Notes
         if: steps.organize.outputs.has_assets == 'true'
@@ -738,13 +766,15 @@ jobs:
             filename=$(basename "$zip")
             model="${filename%%_*}"
             
-            if [[ "$filename" =~ _([0-9]+\.[0-9]+) ]]; then
+            # Support patch versions (e.g., 6.6.3)
+            if [[ "$filename" =~ _([0-9]+\.[0-9]+(\.[0-9]+)?) ]]; then
               kernel_ver="${BASH_REMATCH[1]}"
             else
               kernel_ver="See ZIP"
             fi
             
-            if unzip -l "$zip" 2>/dev/null | grep -q "ksu_module_susfs"; then
+            # Use faster unzip -Z1 for large ZIPs
+            if unzip -Z1 "$zip" 2>/dev/null | grep -qm1 "ksu_module_susfs"; then
               status="✅"
             else
               status="⚠️"
@@ -775,12 +805,17 @@ jobs:
           - SUSFS KSU Module (v1.5.2+ from CI)
           - AnyKernel3 flasher
           - Tools and scripts
+          - SHA256 checksums for verification
 
           ## Installation
           1. Download the AnyKernel3 ZIP for your device
-          2. Flash via Kernel Flasher or SukiSU Ultra Manager
-          3. Reboot
-          4. Verify SUSFS is active:
+          2. Verify integrity (optional):
+             ```bash
+             sha256sum -c SHA256SUMS
+             ```
+          3. Flash via Kernel Flasher or SukiSU Ultra Manager
+          4. Reboot
+          5. Verify SUSFS is active:
              ```bash
              su -c "dmesg | grep -i susfs"
              ```
@@ -818,6 +853,11 @@ jobs:
             ASSETS+=("$file")
           done < <(find ./release-assets -type f -name "*.zip" -print0 2>/dev/null | sort -z || true)
           
+          # Include checksums if present
+          if [ -f release-assets/SHA256SUMS ]; then
+            ASSETS+=("release-assets/SHA256SUMS")
+          fi
+          
           count=${#ASSETS[@]}
           echo "Found $count asset(s)."
           
@@ -830,7 +870,7 @@ jobs:
           if [ "${IS_PRERELEASE:-false}" = "true" ]; then
             PRERELEASE_FLAG="--prerelease"
           else
-            PRERELEASE_FLAG="--latest"
+            PRERELEASE_FLAG=""
           fi
           
           echo "Uploading assets:"
@@ -909,8 +949,8 @@ jobs:
             echo "::warning::Release has no ZIP assets."
           else
             echo ""
-            echo "Uploaded Assets:"
-            echo "$RELEASE_INFO" | jq -r '.assets[] | "  - \(.name) (\((.size | tonumber) / 1048576 | floor)MB)"'
+            echo "Uploaded Assets (sorted):"
+            echo "$RELEASE_INFO" | jq -r '.assets | sort_by(.name)[] | "  - \(.name) (\((.size | tonumber) / 1048576 | floor)MB)"'
             echo ""
             echo "✅ Release verified successfully with $ZIPS kernel ZIP(s)!"
           fi
@@ -959,7 +999,7 @@ jobs:
                 gh release view "${TAG}" \
                   --repo "${{ github.repository }}" \
                   --json assets \
-                  --jq '.assets[] | "- \(.name) (\((.size | tonumber) / 1048576 | floor)MB)"' \
+                  --jq '.assets | sort_by(.name)[] | "- \(.name) (\((.size | tonumber) / 1048576 | floor)MB)"' \
                   2>/dev/null || echo "- Could not fetch asset list"
               fi
               
@@ -976,7 +1016,7 @@ jobs:
                   size_bytes=$(stat -c%s "$f" 2>/dev/null || echo "0")
                   size_mb=$((size_bytes / 1048576))
                   
-                  if unzip -l "$f" 2>/dev/null | grep -q "ksu_module_susfs"; then
+                  if unzip -Z1 "$f" 2>/dev/null | grep -qm1 "ksu_module_susfs"; then
                     status_icon="✅"
                   else
                     status_icon="⚠️"
