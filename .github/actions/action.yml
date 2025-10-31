@@ -1420,85 +1420,86 @@ runs:
         
         echo "Creating flashable ZIP: $ZIP_NAME"
         
-        # Build inclusion list dynamically (only include what exists)
-        INCLUDE_ITEMS=(
-          "Image"
-          "anykernel.sh"
-          "banner"
-        )
-        
-        # Add directories if they exist
-        for dir in META-INF tools modules patch ramdisk dtb dtbo vendor_overlay kernel-dtb vendor_boot init_boot recovery; do
-          if [ -d "$dir" ] || [ -e "$dir" ]; then
-            INCLUDE_ITEMS+=("$dir/")
-          fi
-        done
-        
         # ============================================
-        # CRITICAL FIX: Add SUSFS module explicitly
+        # CRITICAL FIX: Detect SUSFS module first
         # ============================================
         SUSFS_MODULE=""
-        # Search for SUSFS module with wildcard
         for f in ksu_module_susfs*.zip; do
           if [ -f "$f" ]; then
             SUSFS_MODULE="$f"
+            echo "✅ SUSFS module detected: $SUSFS_MODULE"
+            ls -lh "$SUSFS_MODULE"
             break
           fi
         done
         
-        if [ -n "$SUSFS_MODULE" ]; then
-          INCLUDE_ITEMS+=("$SUSFS_MODULE")
-          echo "✅ SUSFS module will be included: $SUSFS_MODULE"
-          ls -lh "$SUSFS_MODULE"
-        else
-          echo "⚠️ SUSFS module not found"
-          echo "Available .zip files:"
-          ls -lh *.zip 2>/dev/null || echo "No .zip files found"
+        if [ -z "$SUSFS_MODULE" ]; then
+          echo "⚠️ SUSFS module not found (this is non-fatal)"
         fi
         
-        # Show what will be included
+        # ============================================
+        # STRATEGY: Use a staging directory approach
+        # ============================================
+        STAGING_DIR="/tmp/anykernel_staging_$$"
+        mkdir -p "$STAGING_DIR"
+        
         echo ""
-        echo "Files to be included in ZIP:"
-        printf '  - %s\n' "${INCLUDE_ITEMS[@]}"
+        echo "Copying files to staging directory..."
         
-        # ============================================
-        # CRITICAL FIX: Proper exclusion pattern
-        # ============================================
-        # Create ZIP with exclusions that DON'T affect SUSFS module
-        # We exclude by specific patterns, NOT by wildcards that catch our module
+        # Copy essential files
+        cp Image "$STAGING_DIR/"
+        cp anykernel.sh "$STAGING_DIR/"
+        [ -f banner ] && cp banner "$STAGING_DIR/"
         
-        EXCLUDE_PATTERNS=(
-          "*.git*"
-          ".git/*"
-          "kernel-*"
-          "*.tar"
-          "*.tar.*"
-          "*.tgz"
-          "*.7z"
-          "*.rar"
-          # Exclude specific unwanted ZIPs (but not ksu_module_susfs*.zip)
-          "AnyKernel3_*.zip"
-          "ZRAM-Module*.zip"
-          "old_*.zip"
-          "backup_*.zip"
-        )
-        
-        # Build the exclusion arguments
-        EXCLUDE_ARGS=()
-        for pattern in "${EXCLUDE_PATTERNS[@]}"; do
-          EXCLUDE_ARGS+=("-x" "$pattern")
+        # Copy directories if they exist
+        for dir in META-INF tools modules patch ramdisk dtb dtbo vendor_overlay kernel-dtb vendor_boot init_boot recovery; do
+          if [ -d "$dir" ]; then
+            cp -r "$dir" "$STAGING_DIR/"
+          fi
         done
         
-        # Create the ZIP
-        if ! zip -r "$ARTIFACTS_DIR/$ZIP_NAME" \
-          "${INCLUDE_ITEMS[@]}" \
-          "${EXCLUDE_ARGS[@]}" \
-          >/dev/null 2>&1; then
+        # ============================================
+        # CRITICAL: Copy SUSFS module explicitly
+        # ============================================
+        if [ -n "$SUSFS_MODULE" ]; then
+          echo "Copying SUSFS module to staging..."
+          cp "$SUSFS_MODULE" "$STAGING_DIR/"
+          
+          # Verify copy succeeded
+          if [ -f "$STAGING_DIR/$SUSFS_MODULE" ]; then
+            echo "✅ SUSFS module copied successfully"
+            ls -lh "$STAGING_DIR/$SUSFS_MODULE"
+          else
+            echo "::error::Failed to copy SUSFS module to staging"
+            exit 1
+          fi
+        fi
+        
+        # ============================================
+        # Create ZIP from staging directory
+        # ============================================
+        echo ""
+        echo "Creating ZIP from staging directory..."
+        
+        cd "$STAGING_DIR"
+        
+        # Show what will be zipped
+        echo "Files in staging directory:"
+        ls -lah
+        
+        # Create ZIP with NO exclusions (everything in staging is wanted)
+        if ! zip -r "$ARTIFACTS_DIR/$ZIP_NAME" . >/dev/null 2>&1; then
           echo "::error::Failed to create ZIP package"
           exit 1
         fi
         
+        # Clean up staging directory
+        cd "$ANYKERNEL3"
+        rm -rf "$STAGING_DIR"
+        
+        # ============================================
         # Verify ZIP was created
+        # ============================================
         if [ ! -f "$ARTIFACTS_DIR/$ZIP_NAME" ]; then
           echo "::error::ZIP file not found after creation"
           exit 1
@@ -1519,6 +1520,24 @@ runs:
           exit 1
         fi
         
+        # ============================================
+        # Verify SUSFS module is in the ZIP
+        # ============================================
+        if [ -n "$SUSFS_MODULE" ]; then
+          echo ""
+          echo "Verifying SUSFS module in final ZIP..."
+          
+          if unzip -l "$ARTIFACTS_DIR/$ZIP_NAME" | grep -q "ksu_module_susfs"; then
+            echo "✅ SUSFS module CONFIRMED in ZIP:"
+            unzip -l "$ARTIFACTS_DIR/$ZIP_NAME" | grep "ksu_module_susfs"
+          else
+            echo "::error::SUSFS module NOT found in ZIP despite being in staging"
+            echo "ZIP contents:"
+            unzip -l "$ARTIFACTS_DIR/$ZIP_NAME"
+            exit 1
+          fi
+        fi
+        
         # Write outputs
         {
           printf "zip_name=%s\n" "$ZIP_NAME"
@@ -1534,25 +1553,19 @@ runs:
         } >> "$GITHUB_ENV"
         
         echo ""
+        echo "============================================"
         echo "✅ Kernel ZIP created successfully"
+        echo "============================================"
         echo "   Name: ${ZIP_NAME}"
         echo "   Size: $(numfmt --to=iec-i --suffix=B "$ZIP_SIZE" 2>/dev/null || echo "$ZIP_SIZE bytes")"
         echo "   SHA256: ${ZIP_SHA256}"
         
-        # Verify SUSFS module is actually in the ZIP
         if [ -n "$SUSFS_MODULE" ]; then
-          echo ""
-          echo "Verifying SUSFS module in ZIP..."
-          if unzip -l "$ARTIFACTS_DIR/$ZIP_NAME" | grep -q "ksu_module_susfs"; then
-            echo "✅ SUSFS module confirmed in ZIP"
-            # Show the exact entry
-            unzip -l "$ARTIFACTS_DIR/$ZIP_NAME" | grep "ksu_module_susfs"
-          else
-            echo "::warning::SUSFS module NOT found in ZIP despite being present in source"
-            echo "ZIP contents:"
-            unzip -l "$ARTIFACTS_DIR/$ZIP_NAME" | head -30
-          fi
+          echo "   SUSFS: ✅ Included"
+        else
+          echo "   SUSFS: ⚠️ Not available"
         fi
+        echo "============================================"
         
         echo "::endgroup::"
 
