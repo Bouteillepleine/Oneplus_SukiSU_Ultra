@@ -1305,33 +1305,33 @@ runs:
         cd "$GITHUB_WORKSPACE/AnyKernel3"
         
         LATEST_RUN_ID=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
-          "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs?status=success&per_page=50" | \
+          "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs?status=success" | \
           jq -r '.workflow_runs[] | select(.head_branch == "v1.5.2+") | .id' | head -n 1)
         
         if [ -z "$LATEST_RUN_ID" ]; then
           echo "⚠️ No successful run found for branch v1.5.2+"
-          echo "SUSFS_MODULE_DOWNLOADED=false" >> "$GITHUB_ENV"
+          echo "susfs_module_downloaded=false" >> "$GITHUB_ENV"
         else
           ARTIFACT_URL=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
-            "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts?per_page=50" | \
-            jq -r '.artifacts[] | select(.expired==false and (.name | contains("susfs"))) | .archive_download_url' | head -n1)
+            "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts" | \
+            jq -r '.artifacts[0].archive_download_url')
           
           if [ -n "$ARTIFACT_URL" ] && [ "$ARTIFACT_URL" != "null" ]; then
             if curl -L -H "Authorization: Bearer $GITHUB_TOKEN" -o ksu_module_susfs_1.5.2+_CI.zip "$ARTIFACT_URL"; then
               echo "✅ SUSFS module downloaded successfully"
               ls -lh ksu_module_susfs_1.5.2+_CI.zip
-              echo "SUSFS_MODULE_DOWNLOADED=true" >> "$GITHUB_ENV"
+              echo "susfs_module_downloaded=true" >> "$GITHUB_ENV"
             else
               echo "⚠️ Failed to download SUSFS module"
-              echo "SUSFS_MODULE_DOWNLOADED=false" >> "$GITHUB_ENV"
+              echo "susfs_module_downloaded=false" >> "$GITHUB_ENV"
             fi
           else
             echo "⚠️ Failed to fetch artifact URL"
-            echo "SUSFS_MODULE_DOWNLOADED=false" >> "$GITHUB_ENV"
+            echo "susfs_module_downloaded=false" >> "$GITHUB_ENV"
           fi
         fi
         echo "::endgroup::"
-
+        
     - name: Clean Packaging Directories
       shell: bash
       run: |
