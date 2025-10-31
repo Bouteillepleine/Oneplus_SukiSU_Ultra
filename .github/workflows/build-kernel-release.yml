@@ -220,13 +220,12 @@ jobs:
 
           CACHE_VERSION="v3"
 
+          # Use same stable key for restore and save (no job/run suffix)
           CCACHE_BASE="ccache-${MODEL}-${KERNEL_VER}-${ANDROID_VER}-${CONFIG_HASH}-${INPUT_HASH}-${CACHE_VERSION}"
-          JOB_SUFFIX="${{ github.run_id }}-${{ strategy.job-index }}"
-          CCACHE_SAVE="${CCACHE_BASE}-${JOB_SUFFIX}"
           PREBUILTS_KEY="prebuilts-${MODEL}-${KERNEL_VER}-${ANDROID_VER}-${CONFIG_HASH}"
 
           echo "ccache_restore_key=$CCACHE_BASE" >> "$GITHUB_OUTPUT"
-          echo "ccache_save_key=$CCACHE_SAVE" >> "$GITHUB_OUTPUT"
+          echo "ccache_save_key=$CCACHE_BASE" >> "$GITHUB_OUTPUT"
           echo "prebuilts_key=$PREBUILTS_KEY" >> "$GITHUB_OUTPUT"
 
           CCACHE_DIR="$HOME/.ccache"
@@ -234,8 +233,7 @@ jobs:
           echo "CCACHE_MAXSIZE=5G" >> "$GITHUB_ENV"
 
           echo "Generated Keys:"
-          echo "  Restore: $CCACHE_BASE"
-          echo "  Save: $CCACHE_SAVE"
+          echo "  Restore & Save: $CCACHE_BASE"
           echo "  Prebuilts: $PREBUILTS_KEY"
           echo "  Cache Dir: $CCACHE_DIR"
           echo "::endgroup::"
@@ -308,7 +306,7 @@ jobs:
             echo "Cold cache start"
           fi
           echo "::endgroup::"
-
+          
       - name: Persist Ccache Config
         shell: bash
         env:
