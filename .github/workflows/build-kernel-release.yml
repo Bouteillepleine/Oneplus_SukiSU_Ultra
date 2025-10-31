@@ -639,27 +639,53 @@ jobs:
           echo "has_assets=false" >> "$GITHUB_OUTPUT"
           
           echo "::group::Organizing Artifacts"
+          
+          # Ensure artifacts directory exists
+          if [ ! -d ./all-artifacts ]; then
+            echo "::warning::Artifacts directory missing"
+            echo "::endgroup::"
+            exit 0
+          fi
+          
           mkdir -p ./release-assets
           
+          # Find and copy ZIP files (using process substitution to avoid pipefail issues)
           zip_count=0
           while IFS= read -r -d '' zip; do
             [ -f "$zip" ] || continue
             filename=$(basename "$zip")
+            
+            # Check for duplicates
+            if [ -f "./release-assets/$filename" ]; then
+              echo "::warning::Duplicate filename detected: $filename (skipping)"
+              continue
+            fi
+            
             cp -f "$zip" "./release-assets/$filename"
             echo "✓ Copied: $filename"
             ((zip_count++))
-          done < <(find ./all-artifacts -type f -name "*.zip" -print0 2>/dev/null | sort -z || true)
+          done < <(find ./all-artifacts -type f -name "*.zip" -print0 2>/dev/null | sort -z)
           
           echo "::endgroup::"
           echo "ZIP files found: $zip_count"
           
           if [ "$zip_count" -eq 0 ]; then
             echo "::warning::No ZIP files were found. Release creation will be skipped."
+            
+            # Debug: Show what's actually in the directory
+            echo "::group::Debug: Artifacts directory contents"
+            find ./all-artifacts -type f -ls 2>/dev/null | head -20 || echo "No files found"
+            echo "::endgroup::"
           else
             echo "✅ Organized $zip_count ZIP file(s)"
             echo ""
             echo "Final assets:"
-            ls -lh ./release-assets/ || true
+            ls -lh ./release-assets/ 2>/dev/null || true
+            
+            # Calculate total size
+            total_size=$(du -sh ./release-assets 2>/dev/null | awk '{print $1}' || echo "0")
+            echo "Total size: $total_size"
+            
             # Only set true if we actually have assets
             echo "has_assets=true" >> "$GITHUB_OUTPUT"
           fi
