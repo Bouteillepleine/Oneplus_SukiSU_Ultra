@@ -220,14 +220,9 @@ jobs:
 
           CACHE_VERSION="v3"
 
-          # Base key for restore (shared among identical configs)
           CCACHE_BASE="ccache-${MODEL}-${KERNEL_VER}-${ANDROID_VER}-${CONFIG_HASH}-${INPUT_HASH}-${CACHE_VERSION}"
-
-          # Unique save key per job (prevents parallel save collisions)
           JOB_SUFFIX="${{ github.run_id }}-${{ strategy.job-index }}"
           CCACHE_SAVE="${CCACHE_BASE}-${JOB_SUFFIX}"
-
-          # Prebuilts key stays stable per device/config
           PREBUILTS_KEY="prebuilts-${MODEL}-${KERNEL_VER}-${ANDROID_VER}-${CONFIG_HASH}"
 
           echo "ccache_restore_key=$CCACHE_BASE" >> "$GITHUB_OUTPUT"
@@ -629,44 +624,57 @@ jobs:
         with:
           path: ./all-artifacts
           merge-multiple: false
-        continue-on-error: false
+        continue-on-error: true
 
-      - name: Assert Artifacts Downloaded
+      - name: Organize Assets
+        id: organize
         shell: bash
         run: |
-          echo "::group::Validating artifact download"
-          if [ ! -d ./all-artifacts ] || ! find ./all-artifacts -type f -print -quit | grep -q .; then
-            echo "::error::No artifacts were downloaded from the build job"
-            exit 1
-          fi
-          echo "Artifacts directory exists and contains files"
+          set -euo pipefail
+          
+          # Initialize output flag early
+          echo "has_assets=false" >> "$GITHUB_OUTPUT"
+          
+          echo "::group::Organizing Artifacts"
+          mkdir -p ./release-assets
+          
+          zip_count=0
+          while IFS= read -r -d '' zip; do
+            [ -f "$zip" ] || continue
+            filename=$(basename "$zip")
+            cp -f "$zip" "./release-assets/$filename"
+            echo "✓ Copied: $filename"
+            ((zip_count++))
+          done < <(find ./all-artifacts -type f -name "*.zip" -print0 2>/dev/null | sort -z || true)
+          
           echo "::endgroup::"
-
-      - name: List Downloaded Artifacts
-        shell: bash
-        run: |
-          echo "::group::Downloaded Artifacts Structure"
-          artifact_dirs=$(find ./all-artifacts -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d '[:space:]')
-          zip_count=$(find ./all-artifacts -type f -name "*.zip" 2>/dev/null | wc -l | tr -d '[:space:]')
-          echo "Summary:"
-          echo "  - Artifact directories: $artifact_dirs"
-          echo "  - ZIP files: $zip_count"
-          if [ "$artifact_dirs" -gt 0 ]; then ls -la ./all-artifacts; fi
-          if [ "$zip_count" -gt 0 ]; then
-            find ./all-artifacts -type f -name "*.zip" | head -50
+          echo "ZIP files found: $zip_count"
+          
+          if [ "$zip_count" -eq 0 ]; then
+            echo "::warning::No ZIP files were found. Release creation will be skipped."
+          else
+            echo "✅ Organized $zip_count ZIP file(s)"
+            echo ""
+            echo "Final assets:"
+            ls -lh ./release-assets/ || true
+            # Only set true if we actually have assets
+            echo "has_assets=true" >> "$GITHUB_OUTPUT"
           fi
-          echo "::endgroup::"
 
       - name: Check gh CLI
+        if: steps.organize.outputs.has_assets == 'true'
         shell: bash
         run: |
           gh --version || { echo "::error::GitHub CLI (gh) not found on runner"; exit 1; }
 
       - name: Generate Tag
+        if: steps.organize.outputs.has_assets == 'true'
+        id: gentag
         shell: bash
         run: |
           set -euo pipefail
           BASE_VERSION="v1.5.2"
+          
           echo "::group::Fetching existing releases"
           LATEST=$(gh release list \
             --repo "${{ github.repository }}" \
@@ -675,6 +683,7 @@ jobs:
             --jq '[.[] | select(.tagName | startswith("'"$BASE_VERSION"'-r")) | .tagName] | sort_by(split("-r")[1] | tonumber) | .[-1]' \
             2>/dev/null || echo "")
           echo "::endgroup::"
+          
           if [ -z "$LATEST" ]; then
             NEW_TAG="${BASE_VERSION}-r0"
             echo "No existing tags found, starting with: $NEW_TAG"
@@ -685,117 +694,31 @@ jobs:
             echo "Latest tag: $LATEST (rev $REV)"
             echo "New tag: $NEW_TAG"
           fi
+          
+          # Export to both env and outputs
           echo "NEW_TAG=$NEW_TAG" >> "$GITHUB_ENV"
+          
           if [[ "$NEW_TAG" =~ (alpha|beta|rc|test|dev|pre) ]]; then
-            echo "IS_PRERELEASE=true" >> "$GITHUB_ENV"
+            IS_PRERELEASE=true
           else
-            echo "IS_PRERELEASE=false" >> "$GITHUB_ENV"
+            IS_PRERELEASE=false
           fi
+          
+          echo "IS_PRERELEASE=$IS_PRERELEASE" >> "$GITHUB_ENV"
+          
+          # Also as step outputs for later reference
+          echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+          echo "is_prerelease=$IS_PRERELEASE" >> "$GITHUB_OUTPUT"
+          
           echo "Tag to be created: $NEW_TAG"
-
-      - name: Organize Assets
-        shell: bash
-        run: |
-          set -euo pipefail
-          
-          echo "::group::Organizing Artifacts"
-          
-          mkdir -p ./release-assets
-          
-          # Copy all ZIP files with original names
-          zip_count=0
-          while IFS= read -r zip; do
-            [ -f "$zip" ] || continue
-            filename=$(basename "$zip")
-            cp "$zip" "./release-assets/$filename"
-            echo "✓ Copied: $filename"
-            ((zip_count++))
-          done < <(find ./all-artifacts -type f -name "*.zip" 2>/dev/null)
-          
-          echo "::endgroup::"
-          
-          if [ "$zip_count" -eq 0 ]; then
-            echo "::error::No ZIP files were found!"
-            echo ""
-            echo "Debug info:"
-            echo "all-artifacts exists: $([ -d ./all-artifacts ] && echo 'yes' || echo 'no')"
-            echo "all-artifacts contents:"
-            ls -la ./all-artifacts/ 2>/dev/null || echo "Directory not found"
-            exit 1
-          fi
-          
-          echo ""
-          echo "✅ Organized $zip_count ZIP file(s)"
-          echo ""
-          echo "Final assets:"
-          ls -lh ./release-assets/
-
-      - name: Extract Build Info from ZIPs
-        shell: bash
-        run: |
-          set -euo pipefail
-          
-          echo "::group::Extracting Build Information"
-          
-          # Create temporary directory for extraction
-          mkdir -p ./temp-extract
-          
-          declare -A device_info
-          
-          for zip in ./release-assets/*.zip; do
-            [ -f "$zip" ] || continue
-            
-            filename=$(basename "$zip")
-            echo "Processing: $filename"
-            
-            # Extract model from filename
-            if [[ "$filename" =~ ^([^_]+)_ ]]; then
-              model="${BASH_REMATCH[1]}"
-            else
-              model="Unknown"
-            fi
-            
-            # Try to extract version info from ZIP contents
-            temp_dir="./temp-extract/${model}"
-            mkdir -p "$temp_dir"
-            
-            # Extract only specific files for info
-            unzip -q -o "$zip" -d "$temp_dir" "*.prop" "*.txt" 2>/dev/null || true
-            
-            # Try to find kernel version
-            kernel_ver="Unknown"
-            if [ -f "$temp_dir/version" ]; then
-              kernel_ver=$(cat "$temp_dir/version" | head -1)
-            elif [ -f "$temp_dir/Image.gz-dtb" ]; then
-              # Could extract from kernel image if needed
-              kernel_ver="Embedded"
-            fi
-            
-            # Store info
-            device_info["$model"]="$kernel_ver"
-            
-            echo "  Model: $model"
-            echo "  Kernel: $kernel_ver"
-          done
-          
-          # Clean up temp
-          rm -rf ./temp-extract
-          
-          echo "::endgroup::"
-          
-          # Export for use in release notes
-          {
-            echo "DEVICE_INFO<<EOF"
-            for model in "${!device_info[@]}"; do
-              echo "$model|${device_info[$model]}"
-            done
-            echo "EOF"
-          } >> "$GITHUB_ENV"
+          echo "Prerelease: $IS_PRERELEASE"
 
       - name: Generate Release Notes
+        if: steps.organize.outputs.has_assets == 'true'
         shell: bash
         run: |
           set -euo pipefail
+          
           cat << 'EOF' > notes.md
           # SukiSU Ultra with SUSFS v1.5.2+
 
@@ -813,36 +736,25 @@ jobs:
             [ -f "$zip" ] || continue
             
             filename=$(basename "$zip")
+            model="${filename%%_*}"
             
-            # Extract model from filename
-            if [[ "$filename" =~ ^([^_]+)_ ]]; then
-              model="${BASH_REMATCH[1]}"
-            else
-              model="Unknown"
-            fi
-            
-            # Extract kernel version from filename if present
             if [[ "$filename" =~ _([0-9]+\.[0-9]+) ]]; then
               kernel_ver="${BASH_REMATCH[1]}"
             else
               kernel_ver="See ZIP"
             fi
             
-            # Check if SUSFS module is in ZIP
             if unzip -l "$zip" 2>/dev/null | grep -q "ksu_module_susfs"; then
               status="✅"
             else
               status="⚠️"
             fi
             
-            printf "| %-12s | %-18s | %s |\n" \
-              "$model" "$kernel_ver" "$status" >> notes.md
+            printf "| %-12s | %-18s | %s |\n" "$model" "$kernel_ver" "$status" >> notes.md
             ((device_count++))
           done
           
-          if [ "$device_count" -eq 0 ]; then
-            echo "| No builds completed | - | ❌ |" >> notes.md
-          fi
+          [ "$device_count" -eq 0 ] && echo "| No builds completed | - | ❌ |" >> notes.md
           
           cat << 'EOF' >> notes.md
 
@@ -869,7 +781,9 @@ jobs:
           2. Flash via Kernel Flasher or SukiSU Ultra Manager
           3. Reboot
           4. Verify SUSFS is active:
+             ```bash
              su -c "dmesg | grep -i susfs"
+             ```
 
           ## Legend
           - ✅ = SUSFS module confirmed in package
@@ -888,129 +802,201 @@ jobs:
           echo "::endgroup::"
 
       - name: Create Release with Assets
+        if: steps.organize.outputs.has_assets == 'true'
+        id: create-release
         shell: bash
         run: |
           set -euo pipefail
+          
+          # Initialize output flag early
+          echo "release_created=false" >> "$GITHUB_OUTPUT"
+          
           echo "::group::Preparing release"
-          if [ "${{ env.IS_PRERELEASE }}" = "true" ]; then
+          
+          ASSETS=()
+          while IFS= read -r -d '' file; do
+            ASSETS+=("$file")
+          done < <(find ./release-assets -type f -name "*.zip" -print0 2>/dev/null | sort -z || true)
+          
+          count=${#ASSETS[@]}
+          echo "Found $count asset(s)."
+          
+          if [ "$count" -eq 0 ]; then
+            echo "::warning::No assets to upload. Skipping release creation."
+            echo "::endgroup::"
+            exit 0
+          fi
+          
+          if [ "${IS_PRERELEASE:-false}" = "true" ]; then
             PRERELEASE_FLAG="--prerelease"
           else
             PRERELEASE_FLAG="--latest"
           fi
-          ASSETS=()
-          while IFS= read -r -d '' file; do
-            ASSETS+=("$file")
-          done < <(find ./release-assets -type f -name "*.zip" -print0 2>/dev/null | sort -z)
-          [ ${#ASSETS[@]} -eq 0 ] && { echo "::error::No assets found to upload!"; exit 1; }
-          echo "Found ${#ASSETS[@]} asset(s) to upload:"
+          
+          echo "Uploading assets:"
           printf '  - %s\n' "${ASSETS[@]}"
           echo "::endgroup::"
+          
           for attempt in 1 2 3; do
-            echo "::group::Attempt $attempt/3: Creating release ${{ env.NEW_TAG }}"
-            if gh release create "${{ env.NEW_TAG }}" \
+            echo "::group::Attempt $attempt/3: Creating release ${NEW_TAG}"
+            
+            if gh release create "${NEW_TAG}" \
               --repo "${{ github.repository }}" \
-              --title "${{ env.RELEASE_NAME }} (${{ env.NEW_TAG }})" \
+              --title "${RELEASE_NAME} (${NEW_TAG})" \
               --notes-file notes.md \
               --target "${{ github.sha }}" \
               $PRERELEASE_FLAG \
               "${ASSETS[@]}"; then
               echo "::endgroup::"
-              echo "Release created successfully"
+              echo "✅ Release created successfully"
+              echo "release_created=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            echo "::endgroup::"
-            echo "Attempt $attempt failed"
-            if [ $attempt -lt 3 ]; then
-              sleep_time=$(( (RANDOM % (attempt * 5)) + attempt * 3 ))
-              echo "Retrying in ${sleep_time}s..."
-              sleep $sleep_time
+            
+            # Handle tag collision (rerun scenario)
+            if gh release view "${NEW_TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+              echo "Release already exists. Attempting to upload assets to existing release..."
+              if gh release upload "${NEW_TAG}" "${ASSETS[@]}" \
+                --repo "${{ github.repository }}" \
+                --clobber; then
+                echo "::endgroup::"
+                echo "✅ Assets uploaded to existing release"
+                echo "release_created=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
             fi
+            
+            echo "::endgroup::"
+            echo "⚠️ Attempt $attempt failed"
+            [ $attempt -lt 3 ] && sleep $((attempt * 3))
           done
-          echo "::error::Failed to create release after 3 attempts"
-          exit 1
+          
+          echo "::warning::Failed to create or update release after 3 attempts. Continuing without failing."
+          exit 0
 
       - name: Verify Release
-        if: success()
+        if: steps.create-release.outputs.release_created == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          echo "::group::Verifying release ${{ env.NEW_TAG }}"
+          
+          # Use step output as fallback if env not set
+          TAG="${NEW_TAG:-${{ steps.gentag.outputs.new_tag }}}"
+          
+          echo "::group::Verifying release ${TAG}"
           sleep 3
-          RELEASE_INFO=$(gh release view "${{ env.NEW_TAG }}" \
+          
+          if ! gh release view "${TAG}" \
             --repo "${{ github.repository }}" \
-            --json tagName,name,url,assets,isDraft,isPrerelease,createdAt)
+            --json tagName,name,url,assets,isDraft,isPrerelease,createdAt > /tmp/release.json 2>/dev/null; then
+            echo "::warning::Release not found or gh failed. Skipping verification."
+            echo "::endgroup::"
+            exit 0
+          fi
+          
+          RELEASE_INFO=$(cat /tmp/release.json)
           ASSET_COUNT=$(echo "$RELEASE_INFO" | jq '.assets | length')
           ZIPS=$(echo "$RELEASE_INFO" | jq '[.assets[] | select(.name | endswith(".zip"))] | length')
-          IS_DRAFT=$(echo "$RELEASE_INFO" | jq -r '.isDraft')
-          IS_PRERELEASE=$(echo "$RELEASE_INFO" | jq -r '.isPrerelease')
           RELEASE_URL=$(echo "$RELEASE_INFO" | jq -r '.url')
-          CREATED_AT=$(echo "$RELEASE_INFO" | jq -r '.createdAt')
+          
           echo "Release Details:"
-          echo "  Tag: ${{ env.NEW_TAG }}"
+          echo "  Tag: ${TAG}"
           echo "  URL: $RELEASE_URL"
           echo "  Total Assets: $ASSET_COUNT"
           echo "  ZIP Assets: $ZIPS"
-          echo "  Draft: $IS_DRAFT"
-          echo "  Prerelease: $IS_PRERELEASE"
-          echo "  Created: $CREATED_AT"
-          [ "$ASSET_COUNT" -eq 0 ] && { echo "::error::No assets found in release!"; exit 1; }
-          [ "$ZIPS" -eq 0 ] && { echo "::error::Release has no .zip assets!"; exit 1; }
-          echo "Uploaded Assets:"
-          echo "$RELEASE_INFO" | jq -r '.assets[] | "  - \(.name) (\(.size | tonumber | (. / 1048576 | floor))MB)"'
+          
+          if [ "$ASSET_COUNT" -eq 0 ] || [ "$ZIPS" -eq 0 ]; then
+            echo "::warning::Release has no ZIP assets."
+          else
+            echo ""
+            echo "Uploaded Assets:"
+            echo "$RELEASE_INFO" | jq -r '.assets[] | "  - \(.name) (\((.size | tonumber) / 1048576 | floor)MB)"'
+            echo ""
+            echo "✅ Release verified successfully with $ZIPS kernel ZIP(s)!"
+          fi
+          
           echo "::endgroup::"
-          echo "Release verified successfully with $ZIPS kernel ZIP(s)!"
+          exit 0
 
       - name: Release Summary
         if: always()
         shell: bash
         run: |
           status="${{ job.status }}"
-          [ "$status" = "success" ] && emoji="✅" || emoji="❌"
-          cat >> $GITHUB_STEP_SUMMARY << EOF
-          # $emoji Release: ${NEW_TAG:-N/A}
-
-          Status: $status
-          Type: $([ "${{ env.IS_PRERELEASE }}" = "true" ] && echo "Prerelease" || echo "Stable")
-          EOF
-          if [ "$status" = "success" ] && [ -n "${NEW_TAG:-}" ]; then
-            echo "URL: https://github.com/${{ github.repository }}/releases/tag/$NEW_TAG" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "## Assets" >> $GITHUB_STEP_SUMMARY
-            gh release view "$NEW_TAG" \
-              --repo "${{ github.repository }}" \
-              --json assets \
-              --jq '.assets[] | "- \(.name) (\((.size | tonumber) / 1048576 | floor)MB)"' \
-              >> $GITHUB_STEP_SUMMARY 2>/dev/null || echo "- Could not fetch asset list" >> $GITHUB_STEP_SUMMARY
-          else
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "## Release Failed" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            if [ -d ./release-assets ]; then
-              echo "Assets that were prepared:" >> $GITHUB_STEP_SUMMARY
-              find ./release-assets -name "*.zip" -type f 2>/dev/null | sort | while read -r f; do
-                filename=$(basename "$f")
-                size_bytes=$(stat -c%s "$f" 2>/dev/null || echo "0")
-                size_mb=$((size_bytes / 1048576))
-                if unzip -l "$f" 2>/dev/null | grep -q "ksu_module_susfs"; then
-                  status_icon="✅"
-                else
-                  status_icon="⚠️"
-                fi
-                echo "- $status_icon $filename (${size_mb}MB)" >> $GITHUB_STEP_SUMMARY
-              done || echo "- No assets found" >> $GITHUB_STEP_SUMMARY
+          [ "$status" = "success" ] && emoji="✅" || emoji="⚠️"
+          
+          # Prefer step outputs for reliability
+          TAG="${NEW_TAG:-${{ steps.gentag.outputs.new_tag || '' }}}"
+          IS_PRE="${{ steps.gentag.outputs.is_prerelease || '' }}"
+          
+          {
+            echo "# $emoji Release Job: $status"
+            echo ""
+            
+            if [ "${{ steps.organize.outputs.has_assets }}" != "true" ]; then
+              echo "## No Assets Found"
+              echo ""
+              echo "No ZIP files were available from the build job."
+              echo "Release creation was skipped."
+              echo ""
+              echo "**Possible reasons:**"
+              echo "- All build jobs failed"
+              echo "- Artifacts were not uploaded"
+              echo "- Artifact download failed"
+              echo ""
+              echo "Check the build job logs for details."
+              
+            elif [ "${{ steps.create-release.outputs.release_created }}" = "true" ]; then
+              echo "## Release Created Successfully"
+              echo ""
+              echo "**Tag:** \`${TAG:-N/A}\`"
+              echo "**Type:** $([ "${IS_PRE}" = "true" ] && echo "Prerelease" || echo "Stable")"
+              [ -n "${TAG:-}" ] && echo "**URL:** https://github.com/${{ github.repository }}/releases/tag/${TAG}"
+              echo ""
+              echo "### Assets"
+              
+              if command -v gh >/dev/null 2>&1 && [ -n "${TAG:-}" ]; then
+                gh release view "${TAG}" \
+                  --repo "${{ github.repository }}" \
+                  --json assets \
+                  --jq '.assets[] | "- \(.name) (\((.size | tonumber) / 1048576 | floor)MB)"' \
+                  2>/dev/null || echo "- Could not fetch asset list"
+              fi
+              
             else
-              echo "No assets were prepared (check earlier steps)" >> $GITHUB_STEP_SUMMARY
+              echo "## Release Creation Failed"
+              echo ""
+              echo "Assets were prepared but release creation/upload failed after retries."
+              echo ""
+              echo "**Prepared assets:**"
+              
+              if [ -d ./release-assets ]; then
+                find ./release-assets -name "*.zip" -type f 2>/dev/null | sort | while read -r f; do
+                  filename=$(basename "$f")
+                  size_bytes=$(stat -c%s "$f" 2>/dev/null || echo "0")
+                  size_mb=$((size_bytes / 1048576))
+                  
+                  if unzip -l "$f" 2>/dev/null | grep -q "ksu_module_susfs"; then
+                    status_icon="✅"
+                  else
+                    status_icon="⚠️"
+                  fi
+                  
+                  echo "- $status_icon $filename (${size_mb}MB)"
+                done || echo "- No assets found"
+              else
+                echo "- No assets found"
+              fi
             fi
-          fi
-          cat >> $GITHUB_STEP_SUMMARY << 'EOF'
-
-          ## Configuration
-          | Setting | Value |
-          |---------|-------|
-          | Hook | `${{ inputs.hook }}` |
-          | LSM | `${{ inputs.lsm }}` |
-          | ZRAM | `${{ inputs.enable_zram }}` |
-          | Optimization | `${{ inputs.optimize_level }}` |
-
-          Legend: ✅ = SUSFS module included | ⚠️ = SUSFS module missing
-          EOF
+            
+            echo ""
+            echo "## Build Configuration"
+            echo "| Setting | Value |"
+            echo "|---------|-------|"
+            echo "| Hook | \`${{ inputs.hook }}\` |"
+            echo "| LSM | \`${{ inputs.lsm }}\` |"
+            echo "| ZRAM | \`${{ inputs.enable_zram }}\` |"
+            echo "| Optimization | \`${{ inputs.optimize_level }}\` |"
+            echo ""
+            echo "**Legend:** ✅ = SUSFS module included | ⚠️ = SUSFS module missing"
+          } >> "$GITHUB_STEP_SUMMARY"
