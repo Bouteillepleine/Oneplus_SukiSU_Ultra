@@ -635,12 +635,13 @@ jobs:
         run: |
           set -euo pipefail
           
-          # Initialize output flag early
-          echo "has_assets=false" >> "$GITHUB_OUTPUT"
+          # Ensure Bash is available (mapfile requirement)
+          [ -n "${BASH_VERSION-}" ] || { echo "::error::Bash is required"; exit 1; }
           
+          echo "has_assets=false" >> "$GITHUB_OUTPUT"
           echo "::group::Organizing Artifacts"
           
-          # Ensure artifacts directory exists
+          # Check artifacts directory exists
           if [ ! -d ./all-artifacts ]; then
             echo "::warning::Artifacts directory missing"
             echo "::endgroup::"
@@ -649,46 +650,84 @@ jobs:
           
           mkdir -p ./release-assets
           
-          # Find and copy ZIP files (using process substitution to avoid pipefail issues)
           zip_count=0
-          while IFS= read -r -d '' zip; do
+          last_file=""
+          
+          # Trap for unexpected errors
+          trap 'echo "::error::Organizer aborted. Last processed: ${last_file:-none}"; ls -la ./release-assets 2>/dev/null || true' ERR
+          
+          echo "Scanning for ZIP files..."
+          
+          # Collect all ZIP files into an array (avoids SIGPIPE)
+          if ! mapfile -d '' -t zip_files < <(find ./all-artifacts -type f -name "*.zip" -print0 2>/dev/null); then
+            echo "::error::Failed to scan artifacts directory"
+            echo "::endgroup::"
+            exit 1
+          fi
+          
+          # Early exit if no files found
+          if [ "${#zip_files[@]}" -eq 0 ]; then
+            echo "Found 0 ZIP file(s) to process"
+            echo "::endgroup::"
+            echo "ZIP files found: 0"
+            echo "::warning::No ZIP files found"
+            echo "::group::Debug: Directory contents"
+            find ./all-artifacts -type f -ls 2>/dev/null | head -50 || echo "Empty"
+            echo "::endgroup::"
+            exit 0
+          fi
+          
+          echo "Found ${#zip_files[@]} ZIP file(s) to process"
+          
+          # Sort for deterministic order (NUL-safe)
+          printf '%s\0' "${zip_files[@]}" | LC_ALL=C sort -z | mapfile -d '' -t zip_files
+          
+          # Process each file
+          for zip in "${zip_files[@]}"; do
             [ -f "$zip" ] || continue
-            filename=$(basename "$zip")
             
-            # Check for duplicates
+            filename=$(basename -- "$zip") || { 
+              echo "::error::basename failed for: $zip"
+              continue
+            }
+            last_file="$filename"
+            
             if [ -f "./release-assets/$filename" ]; then
-              echo "::warning::Duplicate filename detected: $filename (skipping)"
+              echo "::warning::Duplicate: $filename (skipping)"
               continue
             fi
             
-            cp -f "$zip" "./release-assets/$filename"
+            if ! cp -f -- "$zip" "./release-assets/$filename"; then
+              echo "::error::Failed to copy: $zip"
+              continue
+            fi
+            
             echo "✓ Copied: $filename"
             ((zip_count++))
-          done < <(find ./all-artifacts -type f -name "*.zip" -print0 2>/dev/null | sort -z)
+          done
           
           echo "::endgroup::"
           echo "ZIP files found: $zip_count"
           
+          # Handle case where files were found but none copied
           if [ "$zip_count" -eq 0 ]; then
-            echo "::warning::No ZIP files were found. Release creation will be skipped."
-            
-            # Debug: Show what's actually in the directory
-            echo "::group::Debug: Artifacts directory contents"
-            find ./all-artifacts -type f -ls 2>/dev/null | head -20 || echo "No files found"
+            echo "::warning::No ZIP files copied (all duplicates or errors)"
+            echo "::group::Debug: Directory contents"
+            find ./all-artifacts -type f -ls 2>/dev/null | head -50 || echo "Empty"
             echo "::endgroup::"
-          else
-            echo "✅ Organized $zip_count ZIP file(s)"
-            echo ""
-            echo "Final assets:"
-            ls -lh ./release-assets/ 2>/dev/null || true
-            
-            # Calculate total size
-            total_size=$(du -sh ./release-assets 2>/dev/null | awk '{print $1}' || echo "0")
-            echo "Total size: $total_size"
-            
-            # Only set true if we actually have assets
-            echo "has_assets=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          
+          # Success case
+          echo "✅ Organized $zip_count ZIP file(s)"
+          echo ""
+          echo "Final assets:"
+          ls -lh ./release-assets/ 2>/dev/null || true
+          
+          total_size=$(du -sh -- ./release-assets 2>/dev/null | awk '{print $1}' || echo "0")
+          echo "Total size: $total_size"
+          
+          echo "has_assets=true" >> "$GITHUB_OUTPUT"
 
       - name: Ensure gh CLI
         if: steps.organize.outputs.has_assets == 'true'
