@@ -1442,12 +1442,8 @@ runs:
         OPTIMIZE="${{ inputs.optimize_level }}"
         DEVICE_NAME="${OP_MODEL}"
         
-        # Create ZIP name based on SUSFS presence
-        if [ "$SUSFS_FOUND" = true ]; then
-          ZIP_NAME="${DEVICE_NAME}_${KERNEL_VERSION}_SukiSU-v${SUKISU_VERSION}_SUSFS-${SUSFS_VERSION}_${HOOK_TYPE}_${OPTIMIZE}_with-module.zip"
-        else
-          ZIP_NAME="${DEVICE_NAME}_${KERNEL_VERSION}_SukiSU-v${SUKISU_VERSION}_SUSFS-${SUSFS_VERSION}_${HOOK_TYPE}_${OPTIMIZE}.zip"
-        fi
+        # Simplified ZIP naming
+        ZIP_NAME="${DEVICE_NAME}_${KERNEL_VERSION}_SukiSU.zip"
         
         echo "Creating ZIP: $ZIP_NAME"
         
@@ -1646,10 +1642,12 @@ runs:
         echo "| **LSM (BBG)** | ${{ inputs.lsm }} |" >> $GITHUB_STEP_SUMMARY
         echo "| **ZRAM** | ${{ inputs.enable_zram }} |" >> $GITHUB_STEP_SUMMARY
         
-        if [ "${SUSFS_MODULE_DOWNLOADED:-false}" = "true" ]; then
+        # Check SUSFS module status from environment variable
+        SUSFS_STATUS="${{ env.SUSFS_IN_ZIP }}"
+        if [ "$SUSFS_STATUS" = "true" ]; then
           echo "| **SUSFS Module** | ✅ Included |" >> $GITHUB_STEP_SUMMARY
         else
-          echo "| **SUSFS Module** | ⚠️ Not downloaded |" >> $GITHUB_STEP_SUMMARY
+          echo "| **SUSFS Module** | ❌ Not included |" >> $GITHUB_STEP_SUMMARY
         fi
         
         echo "" >> $GITHUB_STEP_SUMMARY
@@ -1690,4 +1688,3 @@ runs:
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "---" >> $GITHUB_STEP_SUMMARY
         echo "*Built with ❤️ using GitHub Actions*" >> $GITHUB_STEP_SUMMARY
-
