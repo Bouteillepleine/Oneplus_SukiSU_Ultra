@@ -212,7 +212,7 @@ jobs:
     timeout-minutes: 180
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 26
       matrix: ${{ fromJSON(needs.set-op-model.outputs.matrix) }}
     steps:
       - name: Checkout
