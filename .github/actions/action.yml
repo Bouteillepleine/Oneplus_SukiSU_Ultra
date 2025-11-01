@@ -211,16 +211,40 @@ runs:
         FULL_VERSION="$VERSION.$PATCHLEVEL.$SUBLEVEL"
         cd "$ARTIFACTS_DIR"
         echo "$ANDROID_VERSION-$FULL_VERSION" > "${OP_MODEL}.txt"
+        
+        # Export to environment
         echo "ANDROID_VER=$ANDROID_VERSION" >> "$GITHUB_ENV"
         echo "KERNEL_VER=$VERSION.$PATCHLEVEL" >> "$GITHUB_ENV"
         echo "KERNEL_FULL_VER=$ANDROID_VERSION-$FULL_VERSION" >> "$GITHUB_ENV"
         echo "SUSFS_KERNEL_BRANCH=gki-$ANDROID_VERSION-$VERSION.$PATCHLEVEL" >> "$GITHUB_ENV"
+        
+        # IMPORTANT: Also save to a file for later retrieval
+        echo "$ANDROID_VERSION-$FULL_VERSION" > "$ARTIFACTS_DIR/kernel_version.txt"
+        
         echo "✅ Detected: $ANDROID_VERSION-$FULL_VERSION"
         
-        # Verify environment variables were set
-        echo "::group::Environment Variables Set"
-        env | grep -E '^(ANDROID_VER|KERNEL_VER|KERNEL_FULL_VER|SUSFS_KERNEL_BRANCH)=' || true
+        # Verify by reading back
+        echo "::group::Verify Environment Variables"
+        echo "ANDROID_VER=${ANDROID_VER:-<not set>}"
+        echo "KERNEL_VER=${KERNEL_VER:-<not set>}"
+        echo "KERNEL_FULL_VER=${KERNEL_FULL_VER:-<not set>}"
+        echo "SUSFS_KERNEL_BRANCH=${SUSFS_KERNEL_BRANCH:-<not set>}"
+        
+        # Force re-export if empty
+        if [ -z "${ANDROID_VER:-}" ]; then
+          echo "⚠️ ANDROID_VER is empty, re-exporting..."
+          echo "ANDROID_VER=$ANDROID_VERSION" >> "$GITHUB_ENV"
+        fi
+        if [ -z "${KERNEL_VER:-}" ]; then
+          echo "⚠️ KERNEL_VER is empty, re-exporting..."
+          echo "KERNEL_VER=$VERSION.$PATCHLEVEL" >> "$GITHUB_ENV"
+        fi
+        if [ -z "${KERNEL_FULL_VER:-}" ]; then
+          echo "⚠️ KERNEL_FULL_VER is empty, re-exporting..."
+          echo "KERNEL_FULL_VER=$ANDROID_VERSION-$FULL_VERSION" >> "$GITHUB_ENV"
+        fi
         echo "::endgroup::"
+        
         echo "::endgroup::"
 
     - name: Restore ccache
@@ -464,8 +488,16 @@ runs:
         count_ref="${base_branch:-HEAD}"
         commit_count=$(git rev-list --count "$count_ref" 2>/dev/null || echo 13000)
         KSU_VERSION=$((commit_count + 10700))
-    
+        
+        # CRITICAL: Export immediately
         echo "SUKISUVER=$KSU_VERSION" >> "$GITHUB_ENV"
+        
+        # Verify export
+        echo "::group::Verify SukiSU Version Export"
+        echo "Calculated version: $KSU_VERSION"
+        echo "Environment check:"
+        env | grep -i sukisu || echo "SUKISUVER not found in environment"
+        echo "::endgroup::"
     
         # === Preview injected version ===
         echo "::group::Makefile Version Preview"
@@ -909,7 +941,7 @@ runs:
         export KBUILD_BUILD_HOST="github-actions"
         export KBUILD_BUILD_VERSION=1
         
-                if [ -n "${CLANG_BIN_PATH:-}" ] && [ -x "${CLANG_BIN_PATH}/clang" ]; then
+        if [ -n "${CLANG_BIN_PATH:-}" ] && [ -x "${CLANG_BIN_PATH}/clang" ]; then
           export PATH="${CLANG_BIN_PATH}:$PATH"
         fi
 
@@ -1024,6 +1056,8 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        echo "::group::Save Build Metadata"
+        
         CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
@@ -1033,29 +1067,81 @@ runs:
         SUKISU_VERSION="${SUKISUVER:-}"
         SUSFS_VERSION="${SUSVER:-}"
         
+        echo "Initial values from environment:"
+        echo "  KERNEL_FULL_VER: ${KERNEL_FULL_VER:-<empty>}"
+        echo "  SUKISUVER: ${SUKISUVER:-<empty>}"
+        echo "  SUSVER: ${SUSVER:-<empty>}"
+        
         # If still empty, try to extract from files
         if [ -z "$KERNEL_VERSION" ] && [ -f "$ARTIFACTS_DIR/${OP_MODEL}.txt" ]; then
           KERNEL_VERSION=$(cat "$ARTIFACTS_DIR/${OP_MODEL}.txt")
+          echo "Kernel version from file: $KERNEL_VERSION"
         fi
         
         # Extract from Makefile as last resort
         if [ -z "$KERNEL_VERSION" ]; then
-          cd "$CONFIG_DIR/kernel_platform/common"
-          VERSION=$(grep '^VERSION *=' Makefile | awk '{print $3}')
-          PATCHLEVEL=$(grep '^PATCHLEVEL *=' Makefile | awk '{print $3}')
-          SUBLEVEL=$(grep '^SUBLEVEL *=' Makefile | awk '{print $3}')
-          KERNEL_VERSION="${ANDROID_VER:-android14}-$VERSION.$PATCHLEVEL.$SUBLEVEL"
+          MAKEFILE="$CONFIG_DIR/kernel_platform/common/Makefile"
+          if [ -f "$MAKEFILE" ]; then
+            VERSION=$(grep '^VERSION *=' "$MAKEFILE" | awk '{print $3}')
+            PATCHLEVEL=$(grep '^PATCHLEVEL *=' "$MAKEFILE" | awk '{print $3}')
+            SUBLEVEL=$(grep '^SUBLEVEL *=' "$MAKEFILE" | awk '{print $3}')
+            KERNEL_VERSION="${ANDROID_VER:-android14}-$VERSION.$PATCHLEVEL.$SUBLEVEL"
+            echo "Kernel version from Makefile: $KERNEL_VERSION"
+          fi
         fi
         
-        # Set outputs with fallback to "unknown"
-        echo "kernel_version=${KERNEL_VERSION:-unknown}" >> "$GITHUB_OUTPUT"
-        echo "sukisu_version=${SUKISU_VERSION:-unknown}" >> "$GITHUB_OUTPUT"
-        echo "susfs_version=${SUSFS_VERSION:-unknown}" >> "$GITHUB_OUTPUT"
+        # Extract SukiSU version from KernelSU if not set
+        if [ -z "$SUKISU_VERSION" ]; then
+          KSU_DIR="$CONFIG_DIR/kernel_platform/KernelSU"
+          if [ -d "$KSU_DIR" ]; then
+            cd "$KSU_DIR"
+            base_branch=""
+            for b in main master susfs-main; do
+              if git show-ref --verify --quiet "refs/heads/$b" 2>/dev/null || \
+                 git show-ref --verify --quiet "refs/remotes/origin/$b" 2>/dev/null; then
+                base_branch="$b"
+                break
+              fi
+            done
+            
+            if [ -n "$base_branch" ]; then
+              commit_count=$(git rev-list --count "$base_branch" 2>/dev/null || git rev-list --count HEAD 2>/dev/null || echo 13000)
+              SUKISU_VERSION=$((commit_count + 10700))
+              echo "Calculated SukiSU version: $SUKISU_VERSION"
+            fi
+          fi
+        fi
+        
+        # Extract SUSFS version if not set
+        if [ -z "$SUSFS_VERSION" ]; then
+          SUSFS_HEADER="$CONFIG_DIR/kernel_platform/common/include/linux/susfs.h"
+          if [ -f "$SUSFS_HEADER" ]; then
+            SUSFS_VERSION=$(grep '#define SUSFS_VERSION' "$SUSFS_HEADER" | awk -F'"' '{print $2}')
+            echo "SUSFS version from header: $SUSFS_VERSION"
+          fi
+        fi
+        
+        # Final fallbacks
+        KERNEL_VERSION="${KERNEL_VERSION:-unknown}"
+        SUKISU_VERSION="${SUKISU_VERSION:-unknown}"
+        SUSFS_VERSION="${SUSFS_VERSION:-unknown}"
+        
+        # Export to GitHub Output (CRITICAL: use >> not >)
+        echo "kernel_version=${KERNEL_VERSION}" >> "$GITHUB_OUTPUT"
+        echo "sukisu_version=${SUKISU_VERSION}" >> "$GITHUB_OUTPUT"
+        echo "susfs_version=${SUSFS_VERSION}" >> "$GITHUB_OUTPUT"
+        
+        # Also export to environment for later steps
+        echo "KERNEL_VERSION=${KERNEL_VERSION}" >> "$GITHUB_ENV"
+        echo "SUKISU_VERSION=${SUKISU_VERSION}" >> "$GITHUB_ENV"
+        echo "SUSFS_VERSION=${SUSFS_VERSION}" >> "$GITHUB_ENV"
         
         echo "✅ Metadata saved:"
-        echo "   - Kernel: ${KERNEL_VERSION:-unknown}"
-        echo "   - SukiSU: ${SUKISU_VERSION:-unknown}"
-        echo "   - SUSFS: ${SUSFS_VERSION:-unknown}"
+        echo "   - Kernel: ${KERNEL_VERSION}"
+        echo "   - SukiSU: ${SUKISU_VERSION}"
+        echo "   - SUSFS: ${SUSFS_VERSION}"
+        
+        echo "::endgroup::"
 
     - name: Collect Build Stats / Validate Image
       id: collect_stats
@@ -1218,43 +1304,71 @@ runs:
           exit 1
         fi
         
+        # Copy Image to AnyKernel3
         cp "$IMAGE_PATH" "$GITHUB_WORKSPACE/AnyKernel3/Image"
         cd "$GITHUB_WORKSPACE/AnyKernel3"
         
+        # Determine ZIP name
         ZRAM_SUFFIX=""
         if [ "${{ inputs.enable_zram }}" = "true" ]; then
           ZRAM_SUFFIX="_ZRAM"
         fi
         
-        # Remove .zip extension from ZIP_NAME since zip command will add it
-        ZIP_BASE="AnyKernel3_${OP_MODEL}_${{ env.KERNEL_FULL_VER }}_SukiSU_${SUKISUVER}"
-        ZIP_NAME="${ZIP_BASE}.zip"
+        # Use environment variables with fallbacks
+        KERNEL_VER="${KERNEL_VERSION:-${KERNEL_FULL_VER:-unknown}}"
+        SUKISU_VER="${SUKISU_VERSION:-${SUKISUVER:-unknown}}"
+        
+        ZIP_NAME="AnyKernel3_${OP_MODEL}_${KERNEL_VER}_SukiSU_${SUKISU_VER}${ZRAM_SUFFIX}.zip"
+        
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
         
         echo "Creating flashable ZIP: $ZIP_NAME"
-        # Use -r flag and specify output file explicitly
-        if ! zip -r9 "$ARTIFACTS_DIR/$ZIP_NAME" ./* -x "*.git*" "*.zip" >/dev/null 2>&1; then
+        echo "Output directory: $ARTIFACTS_DIR"
+        
+        # Create ZIP in current directory first
+        if ! zip -r9 "$ZIP_NAME" ./* -x "*.git*" "*.zip" "README.md" 2>&1 | tee /tmp/zip.log; then
           echo "::error::Failed to create ZIP package"
+          cat /tmp/zip.log
           exit 1
         fi
         
+        # Verify ZIP was created
+        if [ ! -f "$ZIP_NAME" ]; then
+          echo "::error::ZIP file not created: $ZIP_NAME"
+          ls -la
+          exit 1
+        fi
+        
+        # Move to artifacts directory
+        mv "$ZIP_NAME" "$ARTIFACTS_DIR/"
+        
+        # Verify final location
         if [ ! -f "$ARTIFACTS_DIR/$ZIP_NAME" ]; then
-          echo "::error::ZIP file not found after creation: $ARTIFACTS_DIR/$ZIP_NAME"
+          echo "::error::ZIP file not found after move: $ARTIFACTS_DIR/$ZIP_NAME"
+          echo "Contents of artifacts directory:"
+          ls -la "$ARTIFACTS_DIR/"
           exit 1
         fi
         
         ZIP_SIZE=$(stat -c%s "$ARTIFACTS_DIR/$ZIP_NAME")
         ZIP_SHA256=$(sha256sum "$ARTIFACTS_DIR/$ZIP_NAME" | awk '{print $1}')
         
+        # Export outputs
         echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
         echo "ZIP_SIZE=$ZIP_SIZE" >> "$GITHUB_OUTPUT"
         echo "ZIP_SHA256=$ZIP_SHA256" >> "$GITHUB_OUTPUT"
+        
+        # Also export to environment
+        echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
+        echo "ZIP_SIZE=$ZIP_SIZE" >> "$GITHUB_ENV"
+        echo "ZIP_SHA256=$ZIP_SHA256" >> "$GITHUB_ENV"
         
         echo "✅ Kernel ZIP created successfully"
         echo "   Name: $ZIP_NAME"
         echo "   Size: $(numfmt --to=iec-i --suffix=B "$ZIP_SIZE")"
         echo "   SHA256: $ZIP_SHA256"
+        echo "   Location: $ARTIFACTS_DIR/$ZIP_NAME"
         echo "::endgroup::"
 
     - name: Upload ZRAM Module (if enabled)
@@ -1324,4 +1438,3 @@ runs:
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "---" >> $GITHUB_STEP_SUMMARY
         echo "*Built with ❤️ using GitHub Actions*" >> $GITHUB_STEP_SUMMARY
-
