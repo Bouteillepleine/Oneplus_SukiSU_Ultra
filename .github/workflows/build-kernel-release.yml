@@ -214,7 +214,6 @@ jobs:
           status="${{ job.status }}"
           [ "$status" = "success" ] && emoji="✅" || emoji="❌"
           
-          # Parse build time
           build_time="${{ steps.build.outputs.build_time }}"
           if [ -n "$build_time" ]; then
             minutes=$((build_time / 60))
@@ -224,7 +223,6 @@ jobs:
             time_str="N/A"
           fi
           
-          # Parse ccache hit rate
           ccache_rate="${{ steps.build.outputs.ccache_hit_rate }}"
           [ -z "$ccache_rate" ] && ccache_rate="N/A"
           
@@ -261,7 +259,7 @@ jobs:
       - name: Upload Kernel ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.build.outputs.zip_name }}
+          name: ${{ matrix.model }}-kernel
           path: ${{ matrix.model }}/artifacts/${{ steps.build.outputs.zip_name }}
           retention-days: 30
           compression-level: 0
@@ -315,17 +313,25 @@ jobs:
           find artifacts -name "*.zip" -type f | while read zip; do
             filename=$(basename "$zip")
             echo "Found: $filename"
-            cp "$zip" "release_zips/$filename"
+            
+            if [ ! -f "release_zips/$filename" ]; then
+              cp "$zip" "release_zips/$filename"
+            else
+              echo "  ⚠️ Skipping duplicate: $filename"
+            fi
           done
           
           ZIP_COUNT=$(find release_zips -name "*.zip" -type f | wc -l)
-          echo "✅ Organized $ZIP_COUNT ZIP file(s)"
+          echo "✅ Organized $ZIP_COUNT unique ZIP file(s)"
           
           if [ "$ZIP_COUNT" -eq 0 ]; then
             echo "::error::No ZIP files found in artifacts!"
+            echo "Artifact structure:"
+            find artifacts -type f
             exit 1
           fi
           
+          echo "Final release files:"
           ls -lh release_zips/
           echo "::endgroup::"
 
