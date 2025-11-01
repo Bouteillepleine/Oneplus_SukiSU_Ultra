@@ -25,7 +25,7 @@ inputs:
     required: false
     default: 'O2'
   clean:                           # ✅ ADD THIS
-    description: 'Clean build (true/false) - disables ccache'
+    description: 'Build (true/false) - disables ccache'
     required: false
     default: 'false'
   github_token:
@@ -309,11 +309,11 @@ runs:
         echo "::endgroup::"
 
     - name: Restore ccache
+      if: ${{ inputs.clean != 'true' }}  # ✅ Skip in clean mode
       uses: actions/cache@v4
       id: ccache-restore
       with:
         path: ${{ env.CCACHE_DIR }}
-        # Shared key across devices with same Android/Kernel/Clang versions
         key: ccache-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}
         restore-keys: |
           ccache-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-
@@ -321,6 +321,7 @@ runs:
           ccache-
 
     - name: Configure ccache
+      if: ${{ inputs.clean != 'true' }}  # ✅ Skip configuration in clean mode
       shell: bash
       run: |
         set -euo pipefail
@@ -374,15 +375,15 @@ runs:
         echo "::group::Clean build requested"
         echo "⚠️ Clean build mode enabled - ccache will be bypassed"
         
-        # Clear ccache for this build
-        export CCACHE_DIR="${{ env.CCACHE_DIR }}"
-        ccache -C  # Clear cache
-        ccache -z  # Zero statistics
-        
-        # Disable ccache for this build
+        # Disable ccache for this build (preserves shared cache for other jobs)
         echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
         
-        echo "✅ Cache cleared and disabled for clean build"
+        # Zero statistics for reporting (doesn't affect cache content)
+        export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+        ccache -z 2>/dev/null || true
+        
+        echo "✅ ccache disabled for clean build"
+        echo "   Shared cache preserved for other matrix jobs"
         echo "::endgroup::"
 
     - name: Clone AnyKernel3
@@ -822,7 +823,7 @@ runs:
         echo "::endgroup::"
 
     - name: Apply SCHED (Fengchi) Patches
-      if: ${{ env.KERNEL_VER == '6.6' && inputs.sched == 'false' }}
+      if: ${{ env.KERNEL_VER == '6.6' && inputs.sched == 'true' }}
       shell: bash
       run: |
         set -euo pipefail
@@ -1183,7 +1184,7 @@ runs:
 
     - name: ccache Post-Build Statistics
       id: ccache_stats
-      if: always()
+      if: ${{ always() && inputs.clean != 'true' }}  # ✅ Skip in clean mode
       shell: bash
       run: |
         set -euo pipefail
@@ -1231,7 +1232,6 @@ runs:
         echo "" >> $GITHUB_STEP_SUMMARY
         
         if [ "${CACHEABLE:-0}" -gt 0 ]; then
-          # Get cache size
           CACHE_SIZE=$(du -sh "$CCACHE_DIR" 2>/dev/null | cut -f1 || echo "unknown")
           
           echo "### Cache Performance" >> $GITHUB_STEP_SUMMARY
@@ -1239,9 +1239,8 @@ runs:
           echo "- **Hits:** $HITS" >> $GITHUB_STEP_SUMMARY
           echo "- **Cacheable Calls:** $CACHEABLE" >> $GITHUB_STEP_SUMMARY
           echo "- **Cache Size:** $CACHE_SIZE" >> $GITHUB_STEP_SUMMARY
-          echo "- **Scope:** Shared across all devices with same Android/Kernel/Clang versions" >> $GITHUB_STEP_SUMMARY
+          echo "- **Scope:** Shared across all devices" >> $GITHUB_STEP_SUMMARY
           
-          # Add visual indicator (FIXED: single line)
           if (( $(echo "$HIT_RATE > 80" | bc -l) )); then
             echo "- **Status:** ✅ Excellent" >> $GITHUB_STEP_SUMMARY
           elif (( $(echo "$HIT_RATE > 50" | bc -l) )); then
