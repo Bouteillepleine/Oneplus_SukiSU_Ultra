@@ -761,7 +761,7 @@ runs:
         
         echo "::endgroup::"
 
-        - name: Patch KernelSU sulog time64_to_tm clash
+    - name: Patch KernelSU sulog time64_to_tm clash
       shell: bash
       run: |
         set -euo pipefail
