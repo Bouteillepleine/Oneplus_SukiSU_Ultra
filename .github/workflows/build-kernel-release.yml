@@ -277,7 +277,7 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ inputs.make_release && github.ref == 'refs/heads/main' }}
     env:
-      GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+      GH_TOKEN: ${{ github.token }}  # ✅ Changed from secrets.PAT_TOKEN
       RELEASE_NAME: 'OnePlus Kernels - SukiSU Ultra & SUSFS v1.5.12'
     steps:
       - name: Checkout
@@ -305,24 +305,14 @@ jobs:
           
           echo "::endgroup::"
       
-      - name: Validate PAT Token
-        shell: bash
+      - name: Verify GitHub CLI Authentication  # ✅ Simplified validation
         run: |
-          set -euo pipefail
-          
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::GH_TOKEN not set. Please add PAT_TOKEN secret."
-            exit 1
-          fi
-          
-          echo "Validating token scopes..."
-          if gh auth status 2>&1 | grep -q "Token:"; then
-            echo "✅ PAT token is valid"
-          else
-            echo "::error::PAT token validation failed"
-            exit 1
-          fi
-          
+          echo "✅ GitHub CLI version:"
+          gh --version
+          echo ""
+          echo "✅ Authentication status:"
+          gh auth status
+      
       - name: Generate and Push Release Tag
         shell: bash
         run: |
@@ -409,7 +399,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts
-
+  
       - name: Organize Artifacts
         run: |
           set -euo pipefail
@@ -466,7 +456,7 @@ jobs:
           echo "📦 Release files ready:"
           ls -lh release_zips/ | tail -n +2
           echo "::endgroup::"
-
+  
       - name: Generate Release Notes
         run: |
           set -euo pipefail
@@ -573,7 +563,7 @@ jobs:
           **Built with ❤️ by GitHub Actions**  
           **Powered by ccache for 5x faster builds** 🚀
           NOTES_END
-
+  
       - name: Create Release
         if: env.TAG_EXISTS != 'true'
         run: |
@@ -600,7 +590,7 @@ jobs:
           
           echo "::error::Failed after ${MAX_RETRIES} attempts"
           exit 1
-
+  
       - name: Upload Release Assets
         if: env.TAG_EXISTS != 'true'
         run: |
@@ -631,7 +621,7 @@ jobs:
           [ "$SUCCESS" -eq 0 ] && exit 1
           
           echo "::endgroup::"
-
+  
       - name: Release Summary
         if: always()
         run: |
@@ -653,7 +643,7 @@ jobs:
               --jq '.assets[] | "- `\(.name)` (\(.size / 1024 / 1024 | floor)MB)"' \
               >> $GITHUB_STEP_SUMMARY || true
           fi
-
+  
       - name: Cleanup on Failure
         if: failure() && env.TAG_EXISTS != 'true'
         run: |
