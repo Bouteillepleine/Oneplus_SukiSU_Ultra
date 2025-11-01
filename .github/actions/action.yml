@@ -19,19 +19,23 @@ inputs:
   enable_zram:
     description: 'Enable ZRAM with advanced compressors (true/false)'
     required: false
-    default: 'false'  
+    default: 'false'
+  sched:
+    description: 'Enable Fengchi scheduler (true/false) - 6.6 kernels only'
+    required: false
+    default: 'false'
   optimize_level:
     description: 'Optimization level (O2/O3)'
     required: false
     default: 'O2'
-  clean:                           # ✅ ADD THIS
-    description: 'Build (true/false) - disables ccache'
+  clean:
+    description: 'Build with no ccache (true/false) - disables ccache'
     required: false
     default: 'false'
   github_token:
     description: 'GitHub token for API access'
     required: true
-
+    
 outputs:
   kernel_version:
     description: 'Built kernel version'
