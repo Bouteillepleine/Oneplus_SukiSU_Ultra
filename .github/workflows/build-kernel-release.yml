@@ -277,8 +277,9 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ inputs.make_release && github.ref == 'refs/heads/main' }}
     env:
-      GH_TOKEN: ${{ github.token }}  # ✅ Changed from secrets.PAT_TOKEN
+      GH_TOKEN: ${{ github.token }}
       RELEASE_NAME: 'OnePlus Kernels - SukiSU Ultra & SUSFS v1.5.12'
+    
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -305,7 +306,7 @@ jobs:
           
           echo "::endgroup::"
       
-      - name: Verify GitHub CLI Authentication  # ✅ Simplified validation
+      - name: Verify GitHub CLI Authentication
         run: |
           echo "✅ GitHub CLI version:"
           gh --version
@@ -314,6 +315,7 @@ jobs:
           gh auth status
       
       - name: Generate and Push Release Tag
+        id: tag  # ✅ Added ID for output reference
         shell: bash
         run: |
           set -euo pipefail
@@ -346,18 +348,23 @@ jobs:
             fi
           fi
           
+          # ✅ Export to both GITHUB_ENV and GITHUB_OUTPUT
           echo "NEW_TAG=${NEW_TAG}" >> "${GITHUB_ENV}"
+          echo "new_tag=${NEW_TAG}" >> "${GITHUB_OUTPUT}"
           echo "📌 Generated tag: ${NEW_TAG}"
           
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
+          # ✅ Initialize TAG_EXISTS with default value
+          TAG_EXISTS="false"
+          
           if git rev-parse -q --verify "refs/tags/${NEW_TAG}" >/dev/null 2>&1; then
             echo "::warning::Tag ${NEW_TAG} already exists locally"
-            echo "TAG_EXISTS=true" >> "${GITHUB_ENV}"
+            TAG_EXISTS="true"
           elif git ls-remote --tags origin "${NEW_TAG}" | grep -q "refs/tags/${NEW_TAG}$"; then
             echo "::warning::Tag ${NEW_TAG} already exists on remote"
-            echo "TAG_EXISTS=true" >> "${GITHUB_ENV}"
+            TAG_EXISTS="true"
           else
             RELEASE_MSG="Release ${NEW_TAG}
           
@@ -371,10 +378,12 @@ jobs:
             
             echo "Pushing tag to remote repository..."
             MAX_RETRIES=3
+            PUSH_SUCCESS="false"
+            
             for i in $(seq 1 ${MAX_RETRIES}); do
               if git push origin "refs/tags/${NEW_TAG}"; then
                 echo "✅ Tag ${NEW_TAG} pushed successfully"
-                echo "TAG_EXISTS=false" >> "${GITHUB_ENV}"
+                PUSH_SUCCESS="true"
                 break
               fi
               
@@ -382,16 +391,23 @@ jobs:
                 echo "⚠️ Push failed (attempt ${i}/${MAX_RETRIES}), retrying in 5s..."
                 sleep 5
               else
+                # Check if tag was created by another process
                 if git ls-remote --tags origin "${NEW_TAG}" | grep -q "refs/tags/${NEW_TAG}$"; then
                   echo "::warning::Tag ${NEW_TAG} was created by another process"
-                  echo "TAG_EXISTS=true" >> "${GITHUB_ENV}"
+                  TAG_EXISTS="true"
                 else
                   echo "::error::Failed to push tag after ${MAX_RETRIES} attempts"
                   exit 1
                 fi
               fi
             done
+            
+            [ "${PUSH_SUCCESS}" = "true" ] && TAG_EXISTS="false"
           fi
+          
+          # ✅ Export TAG_EXISTS to both GITHUB_ENV and GITHUB_OUTPUT
+          echo "TAG_EXISTS=${TAG_EXISTS}" >> "${GITHUB_ENV}"
+          echo "tag_exists=${TAG_EXISTS}" >> "${GITHUB_OUTPUT}"
           
           echo "::endgroup::"
       
@@ -565,7 +581,8 @@ jobs:
           NOTES_END
   
       - name: Create Release
-        if: env.TAG_EXISTS != 'true'
+        # ✅ Use step output instead of env variable
+        if: steps.tag.outputs.tag_exists != 'true'
         run: |
           set -euo pipefail
           echo "::group::Create GitHub release"
@@ -576,8 +593,16 @@ jobs:
               --repo "${{ github.repository }}" \
               --title "${{ env.RELEASE_NAME }}" \
               --notes-file notes.md \
-              --prerelease; then
+              --draft=false \
+              --prerelease=false; then
               echo "✅ Release created successfully"
+              echo "::endgroup::"
+              exit 0
+            fi
+            
+            # ✅ Check if release already exists
+            if gh release view "${NEW_TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+              echo "::warning::Release ${NEW_TAG} already exists"
               echo "::endgroup::"
               exit 0
             fi
@@ -592,7 +617,8 @@ jobs:
           exit 1
   
       - name: Upload Release Assets
-        if: env.TAG_EXISTS != 'true'
+        # ✅ Use step output instead of env variable
+        if: steps.tag.outputs.tag_exists != 'true'
         run: |
           set -euo pipefail
           echo "::group::Upload kernel ZIPs"
@@ -624,6 +650,7 @@ jobs:
   
       - name: Release Summary
         if: always()
+        continue-on-error: true 
         run: |
           STATUS="${{ job.status }}"
           [ "$STATUS" = "success" ] && EMOJI="✅" || EMOJI="❌"
@@ -638,14 +665,31 @@ jobs:
           
           EOF
           
-          if [ "$STATUS" = "success" ] && [ "${TAG_EXISTS}" != "true" ]; then
+          # ✅ Use step output instead of env variable
+          if [ "$STATUS" = "success" ] && [ "${{ steps.tag.outputs.tag_exists }}" != "true" ]; then
             gh release view "${NEW_TAG}" --json assets \
               --jq '.assets[] | "- `\(.name)` (\(.size / 1024 / 1024 | floor)MB)"' \
               >> $GITHUB_STEP_SUMMARY || true
           fi
   
       - name: Cleanup on Failure
-        if: failure() && env.TAG_EXISTS != 'true'
+        # ✅ Use step output instead of env variable
+        if: failure() && steps.tag.outputs.tag_exists != 'true'
         run: |
-          gh release delete "${NEW_TAG}" --yes 2>/dev/null || true
-          git push origin --delete "${NEW_TAG}" 2>/dev/null || true
+          set -euo pipefail
+          echo "::group::Cleanup failed release"
+          
+          # Delete release if it exists
+          if gh release view "${NEW_TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Deleting release ${NEW_TAG}..."
+            gh release delete "${NEW_TAG}" --yes --cleanup-tag 2>/dev/null || true
+          fi
+          
+          # Delete tag from remote
+          if git ls-remote --tags origin "${NEW_TAG}" | grep -q "refs/tags/${NEW_TAG}$"; then
+            echo "Deleting remote tag ${NEW_TAG}..."
+            git push origin --delete "${NEW_TAG}" 2>/dev/null || true
+          fi
+          
+          echo "::warning::Cleanup completed for ${NEW_TAG}"
+          echo "::endgroup::"
