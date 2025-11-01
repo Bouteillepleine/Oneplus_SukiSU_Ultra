@@ -1173,26 +1173,26 @@ runs:
         echo "============================================"
         echo "::endgroup::"
         
-      - name: On failure - Summarize last error
-        if: ${{ failure() }}
-        shell: bash
-        run: |
-          set +e
-          echo "::group::Build Failure Analysis"
-          COMMON="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
-            
-          echo "## 🔴 Build Failed - Last 120 Lines" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-            
-          if [ -f "$COMMON/build.log" ]; then
-            tail -n 120 "$COMMON/build.log" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "build.log not available" >> "$GITHUB_STEP_SUMMARY"
-          fi
-            
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "::endgroup::"
+    - name: On failure - Summarize last error
+      if: ${{ failure() }}
+      shell: bash
+      run: |
+        set +e
+        echo "::group::Build Failure Analysis"
+        COMMON="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
+        
+        echo "## 🔴 Build Failed - Last 120 Lines" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo '```' >> "$GITHUB_STEP_SUMMARY"
+        
+        if [ -f "$COMMON/build.log" ]; then
+          tail -n 120 "$COMMON/build.log" >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "build.log not available" >> "$GITHUB_STEP_SUMMARY"
+        fi
+        
+        echo '```' >> "$GITHUB_STEP_SUMMARY"
+        echo "::endgroup::"
 
     - name: ccache Post-Build Statistics
       id: ccache_stats
