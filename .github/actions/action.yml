@@ -19,15 +19,15 @@ inputs:
   enable_zram:
     description: 'Enable ZRAM with advanced compressors (true/false)'
     required: false
-    default: 'false'
-  sched:
-    description: 'Enable Fengchi scheduler patches (true/false)'
-    required: false
-    default: 'false'
+    default: 'false'  
   optimize_level:
     description: 'Optimization level (O2/O3)'
     required: false
     default: 'O2'
+  clean:                           # ✅ ADD THIS
+    description: 'Clean build (true/false) - disables ccache'
+    required: false
+    default: 'false'
   github_token:
     description: 'GitHub token for API access'
     required: true
@@ -364,6 +364,25 @@ runs:
           echo "Cache will be populated for future builds (shared across devices)"
         fi
         
+        echo "::endgroup::"
+
+    - name: Handle Clean Build Option
+      if: ${{ inputs.clean == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Clean build requested"
+        echo "⚠️ Clean build mode enabled - ccache will be bypassed"
+        
+        # Clear ccache for this build
+        export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+        ccache -C  # Clear cache
+        ccache -z  # Zero statistics
+        
+        # Disable ccache for this build
+        echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
+        
+        echo "✅ Cache cleared and disabled for clean build"
         echo "::endgroup::"
 
     - name: Clone AnyKernel3
@@ -803,7 +822,7 @@ runs:
         echo "::endgroup::"
 
     - name: Apply SCHED (Fengchi) Patches
-      if: ${{ inputs.sched == 'true' }}
+      if: ${{ env.KERNEL_VER == '6.6' && inputs.sched == 'false' }}
       shell: bash
       run: |
         set -euo pipefail
@@ -1022,30 +1041,35 @@ runs:
         export KBUILD_BUILD_HOST="github-actions"
         export KBUILD_BUILD_VERSION=1
         
-        # Configure PATH - ccache wrappers FIRST
+        # Configure PATH
         export PATH="/usr/lib/ccache:$PATH"
         
-        # Then add Clang to PATH
         if [ -n "${CLANG_BIN_PATH:-}" ] && [ -x "${CLANG_BIN_PATH}/clang" ]; then
           export PATH="${CLANG_BIN_PATH}:$PATH"
         fi
         
-        # Verify ccache is in PATH
-        which ccache
-        which clang
-        
-        # Configure ccache for this build with content-based verification
-        export CCACHE_DIR="${{ env.CCACHE_DIR }}"
-        export CCACHE_COMPILERCHECK="content"
-        export CCACHE_BASEDIR="${{ github.workspace }}"
-        export CCACHE_NOHASHDIR="true"
-        export CCACHE_HARDLINK="true"
-        export CCACHE_IGNOREOPTIONS="--sysroot* -fmacro-prefix-map=*"
-        
-        # Compiler settings - route through ccache
-        export HOSTCC="ccache clang"
-        export HOSTCXX="ccache clang++"
-        export CC="ccache clang"
+        # Check if clean build is requested
+        if [ "${{ inputs.clean }}" = "true" ]; then
+          echo "🧹 Clean build mode - ccache disabled"
+          export CCACHE_DISABLE=1
+          export HOSTCC="clang"
+          export HOSTCXX="clang++"
+          export CC="clang"
+        else
+          echo "🚀 Normal build mode - ccache enabled"
+          # Configure ccache
+          export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+          export CCACHE_COMPILERCHECK="content"
+          export CCACHE_BASEDIR="${{ github.workspace }}"
+          export CCACHE_NOHASHDIR="true"
+          export CCACHE_HARDLINK="true"
+          export CCACHE_IGNOREOPTIONS="--sysroot* -fmacro-prefix-map=*"
+          
+          # Compiler settings - route through ccache
+          export HOSTCC="ccache clang"
+          export HOSTCXX="ccache clang++"
+          export CC="ccache clang"
+        fi
         
         # Deterministic debug path mapping for better cache hits
         MAP="-fdebug-prefix-map=${{ github.workspace }}=."
