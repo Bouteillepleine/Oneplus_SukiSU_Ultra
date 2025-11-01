@@ -223,7 +223,6 @@ runs:
         echo "$ANDROID_VERSION-$FULL_VERSION" > "${OP_MODEL}.txt"
         echo "$ANDROID_VERSION-$FULL_VERSION" > "kernel_version.txt"
         
-        # Force export to environment multiple times
         {
           echo "ANDROID_VER=$ANDROID_VERSION"
           echo "KERNEL_VER=$VERSION.$PATCHLEVEL"
@@ -234,14 +233,6 @@ runs:
         
         echo "✅ Detected: $ANDROID_VERSION-$FULL_VERSION"
         echo "   SUSFS Branch: gki-$ANDROID_VERSION-$VERSION.$PATCHLEVEL"
-        
-        # Verify
-        echo "::group::Verify Environment Variables"
-        echo "ANDROID_VER=$ANDROID_VERSION"
-        echo "KERNEL_VER=$VERSION.$PATCHLEVEL"
-        echo "KERNEL_FULL_VER=$ANDROID_VERSION-$FULL_VERSION"
-        echo "::endgroup::"
-        
         echo "::endgroup::"
 
     - name: Restore ccache
@@ -524,12 +515,11 @@ runs:
         TRUSTY_EXISTS="false"
         
         if [[ "$KERNEL_VERSION" == "6.6" ]]; then
-          if [ -f "$GITHUB_WORKSPACE/.repo/manifests_fallback/$OP_MANIFEST" ]; then
-            if grep -q 'common-modules/trusty' "$GITHUB_WORKSPACE/.repo/manifests_fallback/$OP_MANIFEST" 2>/dev/null; then
+          if [ -f "$GITHUB_WORKSPACE/$CONFIG/.repo/manifests_fallback/$OP_MANIFEST" ]; then
+            if grep -q 'common-modules/trusty' "$GITHUB_WORKSPACE/$CONFIG/.repo/manifests_fallback/$OP_MANIFEST" 2>/dev/null; then
               TRUSTY_EXISTS="true"
             fi
           fi
-          echo "trusty_exists=$TRUSTY_EXISTS" >> $GITHUB_OUTPUT
           
           if [[ "$TRUSTY_EXISTS" == "false" && "$(printf '%s\n' "$TKERNEL_VERSION" "6.6.30" | sort -V | head -n1)" = "$TKERNEL_VERSION" ]]; then
             echo "Fixing SUSFS for 6.6 without Trusty OS..."
@@ -1236,13 +1226,13 @@ runs:
           [ -n "$zram_path" ] && break
         done
         
-                if [ -z "$zram_path" ]; then
+        if [ -z "$zram_path" ]; then
           zram_path=$(find "$GITHUB_WORKSPACE/$CONFIG" -type f -name "zram.ko" 2>/dev/null | head -n 1)
         fi
         
         if [ -n "$zram_path" ] && [ -f "$zram_path" ]; then
-          echo "ZRAM module found at: $zram_path"
-          mkdir -p "$(dirname "$target")"
+          echo "ZRAM module found at: $zram_path
+                    mkdir -p "$(dirname "$target")"
           if [ "$(realpath "$zram_path")" != "$(realpath "$target")" ]; then
             cp "$zram_path" "$target"
             echo "ZRAM module copied to package"
@@ -1305,15 +1295,39 @@ runs:
         cp "$IMAGE_PATH" "$GITHUB_WORKSPACE/AnyKernel3/Image"
         cd "$GITHUB_WORKSPACE/AnyKernel3"
         
+        # Build ZIP name with proper formatting
+        HOOK_SUFFIX=""
+        case "${{ inputs.hook }}" in
+          kprobe) HOOK_SUFFIX="_KP" ;;
+          manual) HOOK_SUFFIX="_VFS" ;;
+          tracepoint) HOOK_SUFFIX="_TP" ;;
+        esac
+        
         ZRAM_SUFFIX=""
         if [ "${{ inputs.enable_zram }}" = "true" ]; then
           ZRAM_SUFFIX="_ZRAM"
         fi
         
+        LSM_SUFFIX=""
+        if [ "${{ inputs.lsm }}" = "true" ]; then
+          LSM_SUFFIX="_BBG"
+        fi
+        
+        SCHED_SUFFIX=""
+        if [ "${{ inputs.sched }}" = "true" ]; then
+          SCHED_SUFFIX="_FC"
+        fi
+        
+        OPT_SUFFIX=""
+        if [ "${{ inputs.optimize_level }}" = "O3" ]; then
+          OPT_SUFFIX="_O3"
+        fi
+        
         KERNEL_VER="${KERNEL_VERSION:-${KERNEL_FULL_VER:-unknown}}"
         SUKISU_VER="${SUKISU_VERSION:-${SUKISUVER:-unknown}}"
         
-        ZIP_NAME="AnyKernel3_${OP_MODEL}_${KERNEL_VER}_SukiSU_${SUKISU_VER}${ZRAM_SUFFIX}.zip"
+        # Format: AnyKernel3_MODEL_KERNEL-VERSION_SukiSU_VERSION_HOOK_EXTRAS.zip
+        ZIP_NAME="AnyKernel3_${OP_MODEL}_${KERNEL_VER}_SukiSU_${SUKISU_VER}${HOOK_SUFFIX}${ZRAM_SUFFIX}${LSM_SUFFIX}${SCHED_SUFFIX}${OPT_SUFFIX}.zip"
         
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
@@ -1360,22 +1374,6 @@ runs:
         echo "   Location: $ARTIFACTS_DIR/$ZIP_NAME"
         echo "::endgroup::"
 
-    - name: Upload Kernel ZIP
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ steps.create_zip.outputs.zip_name }}
-        path: ${{ env.CONFIG }}/artifacts/${{ steps.create_zip.outputs.zip_name }}
-        retention-days: 30
-        compression-level: 0
-
-    - name: Upload ZRAM Module
-      if: ${{ inputs.enable_zram == 'true' && steps.zram_find.outputs.upload == 'true' }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: ZRAM-Module-${{ env.OP_MODEL }}
-        path: ZRAM-Module/
-        retention-days: 30
-
     - name: Generate Build Summary
       if: always()
       shell: bash
@@ -1404,14 +1402,14 @@ runs:
           echo "**Filename:** \`${{ steps.create_zip.outputs.zip_name }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          if [ -n "${{ steps.create_zip.outputs.ZIP_SIZE }}" ]; then
-            SIZE_MB=$(echo "scale=2; ${{ steps.create_zip.outputs.ZIP_SIZE }} / 1024 / 1024" | bc)
+          if [ -n "${ZIP_SIZE:-}" ]; then
+            SIZE_MB=$(echo "scale=2; ${ZIP_SIZE} / 1024 / 1024" | bc)
             echo "**Size:** ${SIZE_MB} MB" >> $GITHUB_STEP_SUMMARY
           fi
           
-          if [ -n "${{ steps.create_zip.outputs.ZIP_SHA256 }}" ]; then
+          if [ -n "${ZIP_SHA256:-}" ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**SHA256:** \`${{ steps.create_zip.outputs.ZIP_SHA256 }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "**SHA256:** \`${ZIP_SHA256}\`" >> $GITHUB_STEP_SUMMARY
           fi
         fi
         
@@ -1456,3 +1454,4 @@ runs:
         echo "- Branch: ${OP_BRANCH}" >> $GITHUB_STEP_SUMMARY
         echo "- Manifest: ${OP_MANIFEST}" >> $GITHUB_STEP_SUMMARY
         echo "- KSU Meta: ${{ inputs.ksu_meta }}" >> $GITHUB_STEP_SUMMARY
+
