@@ -1676,7 +1676,7 @@ runs:
         echo "::endgroup::"
 
     - name: Create kernel ZIP package
-      id: create-zip
+      id: create_zip
       shell: bash
       env:
         KERNEL_VERSION: ${{ env.KERNEL_FULL_VER }}
@@ -1764,9 +1764,10 @@ runs:
         ZIP_SIZE=$(stat -c%s "$ARTIFACTS_DIR/$ZIP_NAME")
         ZIP_SHA256=$(sha256sum "$ARTIFACTS_DIR/$ZIP_NAME" | awk '{print $1}')
         
+        # ✅ FIX: Write to BOTH $GITHUB_OUTPUT and $GITHUB_ENV
         echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
-        echo "ZIP_SIZE=$ZIP_SIZE" >> "$GITHUB_OUTPUT"
-        echo "ZIP_SHA256=$ZIP_SHA256" >> "$GITHUB_OUTPUT"
+        echo "zip_size=$ZIP_SIZE" >> "$GITHUB_OUTPUT"
+        echo "zip_sha256=$ZIP_SHA256" >> "$GITHUB_OUTPUT"
         
         echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
         echo "ZIP_SIZE=$ZIP_SIZE" >> "$GITHUB_ENV"
