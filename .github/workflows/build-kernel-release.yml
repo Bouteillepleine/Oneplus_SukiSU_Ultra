@@ -161,6 +161,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix: ${{ fromJSON(needs.set-op-model.outputs.matrix) }}
     steps:
       - name: Checkout
@@ -271,7 +272,6 @@ jobs:
           compression-level: 0
           if-no-files-found: error
 
-  # ✅ FIXED: Proper job-level indentation (same level as 'build' and 'set-op-model')
   release:
     needs: build
     runs-on: ubuntu-latest
@@ -312,15 +312,6 @@ jobs:
           
           if [ -z "${GH_TOKEN:-}" ]; then
             echo "::error::GH_TOKEN not set. Please add PAT_TOKEN secret."
-            echo "::error::"
-            echo "::error::Required setup:"
-            echo "::error::1. Go to Settings → Developer settings → Personal access tokens → Fine-grained tokens"
-            echo "::error::2. Generate new token with:"
-            echo "::error::   - Repository access: Only select repositories → vbn"
-            echo "::error::   - Permissions:"
-            echo "::error::     • Contents: Read and write"
-            echo "::error::     • Workflows: Read and write"
-            echo "::error::3. Add to repository secrets as PAT_TOKEN"
             exit 1
           fi
           
@@ -428,7 +419,6 @@ jobs:
           
           if [ ! -d "artifacts" ]; then
             echo "::error::artifacts/ directory not found!"
-            echo "Current directory structure:"
             ls -la
             exit 1
           fi
@@ -467,10 +457,7 @@ jobs:
           echo "  Total size: $(numfmt --to=iec-i --suffix=B ${TOTAL_SIZE})"
           
           if [ "${ZIP_COUNT}" -eq 0 ]; then
-            echo ""
             echo "::error::No ZIP files found in artifacts!"
-            echo ""
-            echo "🔍 Artifact directory structure:"
             find artifacts -type f -ls
             exit 1
           fi
@@ -528,95 +515,70 @@ jobs:
           ## ✨ Features
           
           ### 🔐 Core Components
-          - ⚡ **SukiSU Ultra Manager** - Enhanced KernelSU manager with advanced features
-          - 🛡️ **SUSFS v1.5.12** - Kernel-level root hiding (module auto-extracted to `/sdcard/`)
+          - ⚡ **SukiSU Ultra Manager** - Enhanced KernelSU manager
+          - 🛡️ **SUSFS v1.5.12** - Kernel-level root hiding
           - 🔐 **Magic Mount** - Seamless file system modifications
-          - 🔧 **Ptrace Fix** - Enhanced debugging support for kernels < 5.16
+          - 🔧 **Ptrace Fix** - Enhanced debugging support
           
           ### 🎯 Hook Types
           - **Manual (VFS)** - Direct VFS hooks (default, most stable)
-          - **Kprobe** - Dynamic kernel probing (flexible)
-          - **Tracepoint** - Kernel tracepoint hooks (low overhead)
+          - **Kprobe** - Dynamic kernel probing
+          - **Tracepoint** - Kernel tracepoint hooks
           
           ### 🌐 Network & Security
-          - 🌐 **WireGuard** - Modern, fast VPN protocol
-          - 🔥 **IP Set** - Advanced firewall rule management
-          - 📈 **BBR** - Google's TCP congestion control
-          - 🛡️ **BBG LSM** - Optional security module (when enabled)
+          - 🌐 **WireGuard** - Modern VPN protocol
+          - 🔥 **IP Set** - Advanced firewall management
+          - 📈 **BBR** - TCP congestion control
+          - 🛡️ **BBG LSM** - Optional security module
           
           ### 🚀 Performance
-          - 💾 **ZRAM Algorithms** - Memory compression (LZ4, ZSTD, LZO)
-          - ⚙️ **TMPFS_XATTR** - Extended attributes for Mountify support
-          - 🚀 **HMBIRD scx** - Fengchi scheduler (6.6 kernels only)
-          - 🎯 **Compiler Optimization** - O2/O3 flags for performance
-          - 📦 **ccache** - Accelerated builds (85-95% cache hit rate)
+          - 💾 **ZRAM** - Memory compression (LZ4, ZSTD, LZO)
+          - ⚙️ **TMPFS_XATTR** - Extended attributes
+          - 🚀 **HMBIRD scx** - Fengchi scheduler (6.6 only)
+          - 🎯 **Compiler Optimization** - O2/O3 flags
+          - 📦 **ccache** - 85-95% cache hit rate
           
-          ## 📦 Installation Guide
+          ## 📦 Installation
           
-          ### Prerequisites
-          - ✅ Unlocked bootloader        
-          - ✅ Backup of current boot image
-          - ✅ Matching device model
+          1. Download correct ZIP for your device
+          2. Flash with SukiSU Manager or Kernel Flasher
+          3. Reboot
           
-          ### Installation Steps
+          ## ⚠️ Important
           
-          1. **Download** the correct ZIP for your device from assets below        
-          2. **Flash** the kernel ZIP with SukiSU Manager or Kernel Flasher
-          3. **Reboot**
+          - Use SukiSU Ultra Manager (not standard KernelSU)
+          - Backup your data before flashing
+          - Verify device model matches kernel
           
-          ### Post-Installation
-          
-          - Open SukiSU Manager to verify installation
-          - Grant root access to apps as needed
-          - Configure SUSFS hiding if required
-          - Check kernel version in Settings → About Phone
-          
-          ## ⚠️ Important Notes
-          
-          - 🔴 **SUSFS module** is included in kernel ZIP          
-          - 🔴 **Use SukiSU Ultra Manager** (not standard KernelSU) for full compatibility
-          - 🔴 **Backup your data** before flashing
-          - 🔴 **Verify device model** matches kernel before flashing     
-                           
           ## 📝 Build Configuration
           
           | Setting | Value |
           |---------|-------|
           | Hook Type | `${{ inputs.hook }}` |
           | BBG LSM | `${{ inputs.lsm }}` |
-          | ZRAM Algorithms | `${{ inputs.enable_zram }}` |
-          | Fengchi Scheduler | `${{ inputs.sched }}` |
-          | Optimization Level | `${{ inputs.optimize_level }}` |
+          | ZRAM | `${{ inputs.enable_zram }}` |
+          | Fengchi | `${{ inputs.sched }}` |
+          | Optimization | `${{ inputs.optimize_level }}` |
           | Clean Build | `${{ inputs.clean_build }}` |
-          
-          ## 🔗 Resources
-          
-          - [📖 SukiSU Documentation](https://github.com/SukiSU-Ultra/SukiSU-Ultra/wiki)
-          - [🛡️ SUSFS Module Source](https://github.com/sidex15/ksu_module_susfs)
-          - [💬 Telegram Support](https://t.me/SukiSU_Ultra)
-          - [🐛 Report Issues](https://github.com/${{ github.repository }}/issues)
           
           ## 📊 Build Statistics
           
-          - **Workflow Run:** #${{ github.run_number }}
-          - **Triggered By:** @${{ github.actor }}
+          - **Run:** #${{ github.run_number }}
+          - **By:** @${{ github.actor }}
           - **Commit:** `${{ github.sha }}`
-          - **Build Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          - **Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
           
           ---
           
           **Built with ❤️ by GitHub Actions**  
           **Powered by ccache for 5x faster builds** 🚀
           NOTES_END
-          
-          echo "✅ Release notes generated ($(wc -l < notes.md) lines)"
 
       - name: Create Release
         if: env.TAG_EXISTS != 'true'
         run: |
           set -euo pipefail
           echo "::group::Create GitHub release"
-          echo "Creating release: ${NEW_TAG}"
           
           MAX_RETRIES=3
           for i in $(seq 1 ${MAX_RETRIES}); do
@@ -631,233 +593,69 @@ jobs:
             fi
             
             if [ "${i}" -lt "${MAX_RETRIES}" ]; then
-              echo "⚠️ Release creation failed (attempt ${i}/${MAX_RETRIES})"
-              echo "Retrying in 5 seconds..."
+              echo "⚠️ Retry ${i}/${MAX_RETRIES} in 5s..."
               sleep 5
-            else
-              echo "::error::Failed to create release after ${MAX_RETRIES} attempts"
-              echo "::endgroup::"
-              exit 1
             fi
           done
-
-      - name: Validate Release Creation
-        if: env.TAG_EXISTS != 'true'
-        run: |
-          set -euo pipefail
-          echo "::group::Validate release"
           
-          sleep 3
-          
-          if gh release view "${NEW_TAG}" \
-             --repo "${{ github.repository }}" \
-             --json name,tagName,isPrerelease,createdAt,url > release_info.json; then
-            
-            echo "✅ Release ${NEW_TAG} verified"
-            echo ""
-            
-            jq -r '"Name: \(.name)
-            Tag: \(.tagName)
-            Prerelease: \(.isPrerelease)
-            Created: \(.createdAt)
-            URL: \(.url)"' release_info.json
-            
-          else
-            echo "::error::Release ${NEW_TAG} not found!"
-            echo "Checking if release exists with different method..."
-            gh release list --repo "${{ github.repository }}" --limit 5
-            exit 1
-          fi
-          
-          echo "::endgroup::"
+          echo "::error::Failed after ${MAX_RETRIES} attempts"
+          exit 1
 
       - name: Upload Release Assets
         if: env.TAG_EXISTS != 'true'
         run: |
           set -euo pipefail
-          echo "::group::Upload kernel ZIPs to release"
+          echo "::group::Upload kernel ZIPs"
           
-          SUCCESS_COUNT=0
-          FAIL_COUNT=0
-          TOTAL_SIZE=0
+          SUCCESS=0
+          FAIL=0
           
           while IFS= read -r -d '' zip; do
             filename=$(basename "${zip}")
-            filesize=$(stat -c%s "${zip}")
-            TOTAL_SIZE=$((TOTAL_SIZE + filesize))
+            echo "📦 Uploading: ${filename}"
             
-            echo ""
-            echo "📦 Uploading: ${filename} ($(numfmt --to=iec-i --suffix=B ${filesize}))"
-            
-            UPLOADED=false
             for i in {1..3}; do
               if gh release upload "${NEW_TAG}" "${zip}" \
                  --repo "${{ github.repository }}" \
-                 --clobber 2>&1; then
-                echo "  ✅ Upload successful"
-                UPLOADED=true
+                 --clobber; then
+                echo "  ✅ Success"
+                ((SUCCESS++))
                 break
               fi
-              
-              if [ "${i}" -lt 3 ]; then
-                echo "  ⚠️ Upload failed, retry ${i}/3 in 5s..."
-                sleep 5
-              fi
-            done
-            
-            if [ "${UPLOADED}" = true ]; then
-              ((SUCCESS_COUNT++))
-            else
-              echo "  ❌ Upload failed after 3 attempts"
-              ((FAIL_COUNT++))
-            fi
+              [ "${i}" -lt 3 ] && sleep 5
+            done || ((FAIL++))
           done < <(find release_zips -name "*.zip" -type f -print0 | sort -z)
           
-          echo ""
-          echo "📊 Upload Summary:"
-          echo "  ✅ Successful: ${SUCCESS_COUNT}"
-          echo "  ❌ Failed: ${FAIL_COUNT}"
-          echo "  📦 Total size: $(numfmt --to=iec-i --suffix=B ${TOTAL_SIZE})"
-          
-          if [ "${FAIL_COUNT}" -gt 0 ]; then
-            echo "::warning::${FAIL_COUNT} file(s) failed to upload"
-          fi
-          
-          if [ "${SUCCESS_COUNT}" -eq 0 ]; then
-            echo "::error::No files were uploaded successfully!"
-            exit 1
-          fi
-          
-          echo "::endgroup::"
-
-      - name: Verify Release Assets
-        if: env.TAG_EXISTS != 'true'
-        run: |
-          set -euo pipefail
-          echo "::group::Verify uploaded assets"
-          
-          ASSET_COUNT=$(gh release view "${NEW_TAG}" \
-            --repo "${{ github.repository }}" \
-            --json assets --jq '.assets | length')
-          
-          LOCAL_COUNT=$(find release_zips -name "*.zip" -type f | wc -l)
-          
-          echo "📊 Asset Verification:"
-          echo "  Local ZIPs: ${LOCAL_COUNT}"
-          echo "  Remote assets: ${ASSET_COUNT}"
-          
-          if [ "${ASSET_COUNT}" -eq 0 ]; then
-            echo "::error::No assets found in release!"
-            exit 1
-          fi
-          
-          if [ "${ASSET_COUNT}" -lt "${LOCAL_COUNT}" ]; then
-            echo "::warning::Only ${ASSET_COUNT} of ${LOCAL_COUNT} files uploaded"
-          else
-            echo "✅ All files uploaded successfully"
-          fi
-          
-          echo ""
-          echo "📦 Release assets:"
-          gh release view "${NEW_TAG}" \
-            --repo "${{ github.repository }}" \
-            --json assets \
-            --jq '.assets[] | "  - \(.name) (\(.size | tonumber / 1024 / 1024 | floor)MB)"'
+          echo "📊 Upload: ✅ $SUCCESS | ❌ $FAIL"
+          [ "$FAIL" -gt 0 ] && echo "::warning::$FAIL files failed"
+          [ "$SUCCESS" -eq 0 ] && exit 1
           
           echo "::endgroup::"
 
       - name: Release Summary
         if: always()
         run: |
-          set -euo pipefail
-          
           STATUS="${{ job.status }}"
-          TAG_STATUS="${{ env.TAG_EXISTS }}"
+          [ "$STATUS" = "success" ] && EMOJI="✅" || EMOJI="❌"
           
-          if [ "${STATUS}" = "success" ]; then
-            EMOJI="✅"
-            COLOR="🟢"
-          elif [ "${STATUS}" = "failure" ]; then
-            EMOJI="❌"
-            COLOR="🔴"
-          else
-            EMOJI="⚠️"
-            COLOR="🟡"
-          fi
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # $EMOJI Release: ${NEW_TAG}
           
-          cat >> "${GITHUB_STEP_SUMMARY}" << EOF
-          # ${EMOJI} Release: ${NEW_TAG}
+          **Status:** $STATUS  
+          **URL:** https://github.com/${{ github.repository }}/releases/tag/${NEW_TAG}
           
-          **Status:** ${COLOR} **${STATUS^^}**  
-          **Tag Existed:** $([ "${TAG_STATUS}" = "true" ] && echo "Yes (skipped)" || echo "No (created)")  
-          **Release URL:** https://github.com/${{ github.repository }}/releases/tag/${NEW_TAG}
-          
-          ---
+          ## 📦 Assets
           
           EOF
           
-          if [ "${STATUS}" = "success" ] && [ "${TAG_STATUS}" != "true" ]; then
-            gh release view "${NEW_TAG}" \
-              --repo "${{ github.repository }}" \
-              --json assets,createdAt \
-              --jq '"## 📦 Uploaded Assets (\(.assets | length) files)
-
-          | Filename | Size | Downloads |
-          |----------|------|-----------|" + (.assets | sort_by(.name) | map("| `\(.name)` | \(.size | tonumber / 1024 / 1024 | floor)MB | \(.downloadCount) |") | join("\n"))' \
-              >> "${GITHUB_STEP_SUMMARY}" || echo "_Asset list unavailable_" >> "${GITHUB_STEP_SUMMARY}"
-          else
-            echo "_Release creation was skipped or failed_" >> "${GITHUB_STEP_SUMMARY}"
+          if [ "$STATUS" = "success" ] && [ "${TAG_EXISTS}" != "true" ]; then
+            gh release view "${NEW_TAG}" --json assets \
+              --jq '.assets[] | "- `\(.name)` (\(.size / 1024 / 1024 | floor)MB)"' \
+              >> $GITHUB_STEP_SUMMARY || true
           fi
-          
-          cat >> "${GITHUB_STEP_SUMMARY}" << EOF
-          
-          ## 🔗 Quick Links
-          
-          - [📥 Download Release](https://github.com/${{ github.repository }}/releases/tag/${NEW_TAG})
-          - [📋 All Releases](https://github.com/${{ github.repository }}/releases)
-          - [🔧 SUSFS Module](https://github.com/sidex15/ksu_module_susfs)
-          - [📱 SukiSU Manager](https://github.com/SukiSU-Ultra/SukiSU-Ultra)
-          
-          ## 📊 Build Statistics
-          
-          | Metric | Value |
-          |--------|-------|
-          | Total Builds | $(find release_zips -name "*.zip" 2>/dev/null | wc -l) |
-          | Workflow Run | #${{ github.run_number }} |
-          | Triggered By | @${{ github.actor }} |
-          | Commit | \`${GITHUB_SHA:0:7}\` |
-          | Branch | \`${GITHUB_REF#refs/heads/}\` |
-          
-          ## ⚙️ Build Configuration
-          
-          | Setting | Value |
-          |---------|-------|
-          | Hook Type | \`${{ inputs.hook }}\` |
-          | BBG LSM | ${{ inputs.lsm && '✅ Enabled' || '❌ Disabled' }} |
-          | ZRAM | ${{ inputs.enable_zram && '✅ Enabled' || '❌ Disabled' }} |
-          | Fengchi Scheduler | ${{ inputs.sched && '✅ Enabled' || '❌ Disabled' }} |
-          | Optimization | \`${{ inputs.optimize_level }}\` |
-          | Clean Build | ${{ inputs.clean_build && '✅ Yes' || '❌ No' }} |
-          EOF
 
       - name: Cleanup on Failure
         if: failure() && env.TAG_EXISTS != 'true'
         run: |
-          set -euo pipefail
-          echo "::group::Cleanup failed release"
-          
-          if gh release view "${NEW_TAG}" \
-             --repo "${{ github.repository }}" > /dev/null 2>&1; then
-            echo "Deleting failed release..."
-            gh release delete "${NEW_TAG}" \
-              --repo "${{ github.repository }}" \
-              --yes || echo "⚠️ Could not delete release"
-          fi
-          
-          echo "Deleting tag from remote..."
-          git push origin --delete "${NEW_TAG}" 2>&1 || echo "⚠️ Could not delete remote tag"
-          
-          git tag -d "${NEW_TAG}" 2>&1 || echo "⚠️ Could not delete local tag"
-          
-          echo "✅ Cleanup completed"
-          echo "::endgroup::"
+          gh release delete "${NEW_TAG}" --yes 2>/dev/null || true
+          git push origin --delete "${NEW_TAG}" 2>/dev/null || true
