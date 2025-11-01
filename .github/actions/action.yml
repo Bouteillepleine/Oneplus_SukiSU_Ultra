@@ -317,8 +317,8 @@ runs:
       uses: actions/cache@v4
       id: ccache-restore
       with:
-        path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}
+        path: ${{ env.CCACHE_DIR }}        
+        key: ccache-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}
         restore-keys: |
           ccache-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-
           ccache-${{ env.ANDROID_VER }}-
@@ -781,7 +781,7 @@ runs:
         echo "::endgroup::"
 
     - name: Apply ZRAM Patches
-      if: ${{ inputs.enable_zram == 'true' }}
+      if: ${{ inputs.sched == 'true' && env.KERNEL_VER == '6.6' }}
       shell: bash
       run: |
         set -euo pipefail
@@ -819,7 +819,7 @@ runs:
         echo "::endgroup::"
 
     - name: Apply OGKI to GKI Conversion
-      if: inputs.sched == 'true' && env.KERNEL_VER == '6.6' 
+      if: ${{ inputs.sched == 'true' && env.KERNEL_VER == '6.6' }} 
       shell: bash
       run: |
         set -euo pipefail
@@ -1017,11 +1017,11 @@ runs:
         export KBUILD_BUILD_HOST="github-actions"
         export KBUILD_BUILD_VERSION=1
         
-        # Configure PATH
-        export PATH="/usr/lib/ccache:$PATH"
+        # ✅ FIXED: Configure PATH - ccache FIRST, then Clang
+        export PATH="/usr/lib/ccache:${PATH}"
         
         if [ -n "${CLANG_BIN_PATH:-}" ] && [ -x "${CLANG_BIN_PATH}/clang" ]; then
-          export PATH="${CLANG_BIN_PATH}:$PATH"
+          export PATH="${CLANG_BIN_PATH}:${PATH}"
         fi
         
         # Check if clean build is requested
@@ -1041,10 +1041,10 @@ runs:
           export CCACHE_HARDLINK="true"
           export CCACHE_IGNOREOPTIONS="--sysroot* -fmacro-prefix-map=*"
           
-          # Compiler settings - route through ccache
-          export HOSTCC="ccache clang"
-          export HOSTCXX="ccache clang++"
-          export CC="ccache clang"
+          # ✅ Compiler settings - ccache wrappers will be used via PATH
+          export HOSTCC="clang"
+          export HOSTCXX="clang++"
+          export CC="clang"
         fi
         
         # Deterministic debug path mapping for better cache hits
@@ -1062,6 +1062,30 @@ runs:
     
         OUT=out
         mkdir -p "$OUT"
+        
+        # ✅ ADDED: Verify ccache is being used
+        echo "============================================"
+        echo "🔍 Compiler Verification"
+        echo "============================================"
+        echo "which clang: $(which clang)"
+        echo ""
+        echo "type -a clang:"
+        type -a clang || true
+        echo ""
+        echo "CC=$CC"
+        echo "HOSTCC=$HOSTCC"
+        echo "HOSTCXX=$HOSTCXX"
+        echo ""
+        
+        # Test ccache wrapper
+        if [ "${{ inputs.clean }}" != "true" ]; then
+          echo "Testing ccache wrapper:"
+          clang --version 2>&1 | head -n1 || echo "⚠️ clang test failed"
+          echo ""
+          echo "ccache pre-build status:"
+          ccache -s || echo "⚠️ ccache not accessible"
+        fi
+        echo "============================================"
         
         echo "Generating defconfig..."
         make O="$OUT" gki_defconfig
@@ -1085,10 +1109,10 @@ runs:
         scripts/config --file "$OUT/.config" -e LTO_CLANG_THIN
         scripts/config --file "$OUT/.config" -e LTO_CLANG
         
+        make O="$OUT" olddefconfig
+        
         KCFLAGS="$KCFLAGS -Wno-error -pipe -fno-stack-protector ${KCFLAGS_EXTRA}"
         KCPPFLAGS="$KCPPFLAGS -DCONFIG_OPTIMIZE_INLINING"
-        
-        make O="$OUT" olddefconfig
         
         echo "============================================"
         echo "🔧 Build Configuration Summary"
@@ -1102,9 +1126,14 @@ runs:
         echo "Clang: ${CLANG_VERSION}"
         echo "Build Timestamp: $KBUILD_BUILD_TIMESTAMP"
         echo "SOURCE_DATE_EPOCH: $SOURCE_DATE_EPOCH"
-        echo "ccache: $(ccache --version | head -n1)"
-        echo "ccache dir: $CCACHE_DIR (shared)"
-        echo "Compiler check: content"
+        
+        if [ "${{ inputs.clean }}" != "true" ]; then
+          echo "ccache: $(ccache --version | head -n1)"
+          echo "ccache dir: $CCACHE_DIR (device-specific: ${OP_MODEL})"
+          echo "Compiler check: content"
+        else
+          echo "ccache: DISABLED (clean build)"
+        fi
         echo "============================================"
         
         BUILD_START=$(date +%s)
@@ -1133,29 +1162,37 @@ runs:
         echo "============================================"
         echo "Duration: $((BUILD_TIME / 60))m $((BUILD_TIME % 60))s"
         echo "Image Size: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")"
+        
+        # ✅ ADDED: Show ccache statistics after build
+        if [ "${{ inputs.clean }}" != "true" ]; then
+          echo ""
+          echo "📊 ccache Statistics (Post-Build)"
+          echo "============================================"
+          ccache -s || echo "⚠️ ccache stats unavailable"
+        fi
         echo "============================================"
         echo "::endgroup::"
-    
-    - name: On failure - Summarize last error
-      if: ${{ failure() }}
-      shell: bash
-      run: |
-        set +e
-        echo "::group::Build Failure Analysis"
-        COMMON="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
         
-        echo "## 🔴 Build Failed - Last 120 Lines" >> "$GITHUB_STEP_SUMMARY"
-        echo "" >> "$GITHUB_STEP_SUMMARY"
-        echo '```' >> "$GITHUB_STEP_SUMMARY"
-        
-        if [ -f "$COMMON/build.log" ]; then
-          tail -n 120 "$COMMON/build.log" >> "$GITHUB_STEP_SUMMARY"
-        else
-          echo "build.log not available" >> "$GITHUB_STEP_SUMMARY"
-        fi
-        
-        echo '```' >> "$GITHUB_STEP_SUMMARY"
-        echo "::endgroup::"
+      - name: On failure - Summarize last error
+        if: ${{ failure() }}
+        shell: bash
+        run: |
+          set +e
+          echo "::group::Build Failure Analysis"
+          COMMON="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
+            
+          echo "## 🔴 Build Failed - Last 120 Lines" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+            
+          if [ -f "$COMMON/build.log" ]; then
+            tail -n 120 "$COMMON/build.log" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "build.log not available" >> "$GITHUB_STEP_SUMMARY"
+          fi
+            
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "::endgroup::"
 
     - name: ccache Post-Build Statistics
       id: ccache_stats
@@ -1231,9 +1268,9 @@ runs:
       if: ${{ always() && inputs.clean != 'true' }} 
       uses: actions/cache/save@v4
       with:
-        path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}
-
+        path: ${{ env.CCACHE_DIR }}        
+        key: ccache-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}
+        
     - name: Save Build Metadata
       id: save_metadata
       shell: bash
@@ -1611,9 +1648,12 @@ runs:
         
         echo "::endgroup::"
 
-    - name: Create Kernel ZIP
-      id: create_zip
+    - name: Create kernel ZIP package
+      id: create-zip
       shell: bash
+      env:
+        KERNEL_VERSION: ${{ env.KERNEL_FULL_VER }}
+        SUKISU_VERSION: ${{ env.SUKISUVER }}
       run: |
         set -euo pipefail
         echo "::group::Create kernel ZIP package"
@@ -1629,39 +1669,11 @@ runs:
         cp "$IMAGE_PATH" "$GITHUB_WORKSPACE/AnyKernel3/Image"
         cd "$GITHUB_WORKSPACE/AnyKernel3"
         
-        # Build ZIP name with proper formatting
-        HOOK_SUFFIX=""
-        case "${{ inputs.hook }}" in
-          kprobe) HOOK_SUFFIX="_KP" ;;
-          manual) HOOK_SUFFIX="_VFS" ;;
-          tracepoint) HOOK_SUFFIX="_TP" ;;
-        esac
-        
-        ZRAM_SUFFIX=""
-        if [ "${{ inputs.enable_zram }}" = "true" ]; then
-          ZRAM_SUFFIX="_ZRAM"
-        fi
-        
-        LSM_SUFFIX=""
-        if [ "${{ inputs.lsm }}" = "true" ]; then
-          LSM_SUFFIX="_BBG"
-        fi
-        
-        SCHED_SUFFIX=""
-        if [ "${{ inputs.sched }}" = "true" ]; then
-          SCHED_SUFFIX="_FC"
-        fi
-        
-        OPT_SUFFIX=""
-        if [ "${{ inputs.optimize_level }}" = "O3" ]; then
-          OPT_SUFFIX="_O3"
-        fi
-        
         KERNEL_VER="${KERNEL_VERSION:-${KERNEL_FULL_VER:-unknown}}"
         SUKISU_VER="${SUKISU_VERSION:-${SUKISUVER:-unknown}}"
         
-        # Format: AnyKernel3_MODEL_KERNEL-VERSION_SukiSU_VERSION_HOOK_EXTRAS.zip
-        ZIP_NAME="AnyKernel3_${OP_MODEL}_${KERNEL_VER}_SukiSU_${SUKISU_VER}${HOOK_SUFFIX}${ZRAM_SUFFIX}${LSM_SUFFIX}${SCHED_SUFFIX}${OPT_SUFFIX}.zip"
+        # Simple format: AnyKernel3_MODEL_KERNEL-VERSION_SukiSU_VERSION.zip
+        ZIP_NAME="AnyKernel3_${OP_MODEL}_${KERNEL_VER}_SukiSU_${SUKISU_VER}.zip"
         
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
@@ -1669,7 +1681,27 @@ runs:
         echo "Creating flashable ZIP: $ZIP_NAME"
         echo "Output directory: $ARTIFACTS_DIR"
         
-        if ! zip -r9 "$ZIP_NAME" ./* -x "*.git*" "*.zip" "README.md" 2>&1 | tee /tmp/zip.log; then
+        # List files before zipping
+        echo ""
+        echo "Files to be included:"
+        ls -lh | grep -v "^d" | head -20
+        
+        # Check for SUSFS module
+        SUSFS_COUNT=$(find . -maxdepth 1 -name "ksu_module_susfs*.zip" -type f | wc -l)
+        if [ "$SUSFS_COUNT" -gt 0 ]; then
+          echo ""
+          echo "✅ Found SUSFS module(s):"
+          find . -maxdepth 1 -name "ksu_module_susfs*.zip" -type f -exec ls -lh {} \;
+        else
+          echo ""
+          echo "⚠️ No SUSFS module found in AnyKernel3 directory"
+        fi
+        
+        # Create ZIP - Include SUSFS module, exclude only the final ZIP
+        if ! zip -r9 "$ZIP_NAME" ./* \
+             -x "*.git*" \
+             -x "$ZIP_NAME" \
+             -x "README.md" 2>&1 | tee /tmp/zip.log; then
           echo "::error::Failed to create ZIP package"
           cat /tmp/zip.log
           exit 1
@@ -1679,6 +1711,18 @@ runs:
           echo "::error::ZIP file not created: $ZIP_NAME"
           ls -la
           exit 1
+        fi
+        
+        # Verify SUSFS module is inside the ZIP
+        echo ""
+        echo "Verifying ZIP contents:"
+        if unzip -l "$ZIP_NAME" | grep -q "ksu_module_susfs"; then
+          echo "✅ SUSFS module is included in ZIP"
+          unzip -l "$ZIP_NAME" | grep "ksu_module_susfs"
+        else
+          echo "⚠️ WARNING: SUSFS module NOT found in ZIP!"
+          echo "ZIP contents:"
+          unzip -l "$ZIP_NAME" | head -30
         fi
         
         mv "$ZIP_NAME" "$ARTIFACTS_DIR/"
@@ -1701,6 +1745,7 @@ runs:
         echo "ZIP_SIZE=$ZIP_SIZE" >> "$GITHUB_ENV"
         echo "ZIP_SHA256=$ZIP_SHA256" >> "$GITHUB_ENV"
         
+        echo ""
         echo "✅ Kernel ZIP created successfully"
         echo "   Name: $ZIP_NAME"
         echo "   Size: $(numfmt --to=iec-i --suffix=B "$ZIP_SIZE")"
