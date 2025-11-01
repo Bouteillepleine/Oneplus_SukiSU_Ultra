@@ -38,6 +38,9 @@ outputs:
   susfs_version:
     description: 'SUSFS version'
     value: ${{ steps.save_metadata.outputs.susfs_version }}
+  image_sha256:
+    description: 'Kernel image SHA256'
+    value: ${{ steps.collect_stats.outputs.image_sha256 }}
   warnings_count:
     description: 'Build warnings count'
     value: ${{ steps.collect_stats.outputs.warnings_count }}
@@ -213,6 +216,11 @@ runs:
         echo "KERNEL_FULL_VER=$ANDROID_VERSION-$FULL_VERSION" >> "$GITHUB_ENV"
         echo "SUSFS_KERNEL_BRANCH=gki-$ANDROID_VERSION-$VERSION.$PATCHLEVEL" >> "$GITHUB_ENV"
         echo "✅ Detected: $ANDROID_VERSION-$FULL_VERSION"
+        
+        # Verify environment variables were set
+        echo "::group::Environment Variables Set"
+        env | grep -E '^(ANDROID_VER|KERNEL_VER|KERNEL_FULL_VER|SUSFS_KERNEL_BRANCH)=' || true
+        echo "::endgroup::"
         echo "::endgroup::"
 
     - name: Restore ccache
@@ -266,6 +274,7 @@ runs:
         if [ -f "kernel_patches/include/linux/susfs.h" ]; then
           SUSFS_VERSION=$(grep '#define SUSFS_VERSION' kernel_patches/include/linux/susfs.h | awk -F'"' '{print $2}')
           echo "SUSFS_VERSION=$SUSFS_VERSION" >> $GITHUB_ENV
+          echo "SUSVER=$SUSFS_VERSION" >> $GITHUB_ENV
           echo "Detected SUSFS version: $SUSFS_VERSION"
         fi
         
@@ -900,7 +909,7 @@ runs:
         export KBUILD_BUILD_HOST="github-actions"
         export KBUILD_BUILD_VERSION=1
         
-        if [ -n "${CLANG_BIN_PATH:-}" ] && [ -x "${CLANG_BIN_PATH}/clang" ]; then
+                if [ -n "${CLANG_BIN_PATH:-}" ] && [ -x "${CLANG_BIN_PATH}/clang" ]; then
           export PATH="${CLANG_BIN_PATH}:$PATH"
         fi
 
@@ -1019,33 +1028,34 @@ runs:
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
         
-        KERNEL_VERSION="${KERNEL_FULL_VER:-unknown}"
-        SUKISU_VERSION="${SUKISUVER:-unknown}"
-        SUSFS_VERSION="${SUSVER:-unknown}"
+        # Read from environment with better fallbacks
+        KERNEL_VERSION="${KERNEL_FULL_VER:-}"
+        SUKISU_VERSION="${SUKISUVER:-}"
+        SUSFS_VERSION="${SUSVER:-}"
         
-        if [ -z "$KERNEL_VERSION" ] || [ "$KERNEL_VERSION" = "unknown" ]; then
-          echo "::warning::KERNEL_FULL_VER not set, using fallback"
-          KERNEL_VERSION="unknown"
+        # If still empty, try to extract from files
+        if [ -z "$KERNEL_VERSION" ] && [ -f "$ARTIFACTS_DIR/${OP_MODEL}.txt" ]; then
+          KERNEL_VERSION=$(cat "$ARTIFACTS_DIR/${OP_MODEL}.txt")
         fi
         
-        if [ -z "$SUKISU_VERSION" ] || [ "$SUKISU_VERSION" = "unknown" ]; then
-          echo "::warning::SUKISUVER not set, using fallback"
-          SUKISU_VERSION="unknown"
+        # Extract from Makefile as last resort
+        if [ -z "$KERNEL_VERSION" ]; then
+          cd "$CONFIG_DIR/kernel_platform/common"
+          VERSION=$(grep '^VERSION *=' Makefile | awk '{print $3}')
+          PATCHLEVEL=$(grep '^PATCHLEVEL *=' Makefile | awk '{print $3}')
+          SUBLEVEL=$(grep '^SUBLEVEL *=' Makefile | awk '{print $3}')
+          KERNEL_VERSION="${ANDROID_VER:-android14}-$VERSION.$PATCHLEVEL.$SUBLEVEL"
         fi
         
-        if [ -z "$SUSFS_VERSION" ] || [ "$SUSFS_VERSION" = "unknown" ]; then
-          echo "::warning::SUSVER not set, using fallback"
-          SUSFS_VERSION="unknown"
-        fi
-        
-        printf 'kernel_version=%s\n' "$KERNEL_VERSION" >> "$GITHUB_OUTPUT"
-        printf 'sukisu_version=%s\n' "$SUKISU_VERSION" >> "$GITHUB_OUTPUT"
-        printf 'susfs_version=%s\n' "$SUSFS_VERSION" >> "$GITHUB_OUTPUT"
+        # Set outputs with fallback to "unknown"
+        echo "kernel_version=${KERNEL_VERSION:-unknown}" >> "$GITHUB_OUTPUT"
+        echo "sukisu_version=${SUKISU_VERSION:-unknown}" >> "$GITHUB_OUTPUT"
+        echo "susfs_version=${SUSFS_VERSION:-unknown}" >> "$GITHUB_OUTPUT"
         
         echo "✅ Metadata saved:"
-        echo "   - Kernel: $KERNEL_VERSION"
-        echo "   - SukiSU: $SUKISU_VERSION"
-        echo "   - SUSFS: $SUSFS_VERSION"
+        echo "   - Kernel: ${KERNEL_VERSION:-unknown}"
+        echo "   - SukiSU: ${SUKISU_VERSION:-unknown}"
+        echo "   - SUSFS: ${SUSFS_VERSION:-unknown}"
 
     - name: Collect Build Stats / Validate Image
       id: collect_stats
@@ -1083,11 +1093,16 @@ runs:
           exit 1
         fi
         
+        # Calculate SHA256
+        IMG_SHA256=$(sha256sum "$IMG" | awk '{print $1}')
+        
         printf 'warnings_count=%s\n' "$WARNINGS_COUNT" >> "$GITHUB_OUTPUT"
+        printf 'image_sha256=%s\n' "$IMG_SHA256" >> "$GITHUB_OUTPUT"
         
         echo "✅ Validation passed:"
         echo "   - Warnings: $WARNINGS_COUNT"
         echo "   - Image size: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")"
+        echo "   - SHA256: $IMG_SHA256"
 
     - name: Download and Package ZRAM Module
       if: ${{ inputs.enable_zram == 'true' }}
@@ -1211,12 +1226,15 @@ runs:
           ZRAM_SUFFIX="_ZRAM"
         fi
         
-        ZIP_NAME="AnyKernel3_${OP_MODEL}_${{ env.KERNEL_FULL_VER }}_SukiSU_${SUKISUVER}_${SUSVER}${ZRAM_SUFFIX}.zip"
+        # Remove .zip extension from ZIP_NAME since zip command will add it
+        ZIP_BASE="AnyKernel3_${OP_MODEL}_${{ env.KERNEL_FULL_VER }}_SukiSU_${SUKISUVER}"
+        ZIP_NAME="${ZIP_BASE}.zip"
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
         
         echo "Creating flashable ZIP: $ZIP_NAME"
-        if ! zip -r "$ARTIFACTS_DIR/$ZIP_NAME" ./* -x "*.git*" >/dev/null 2>&1; then
+        # Use -r flag and specify output file explicitly
+        if ! zip -r9 "$ARTIFACTS_DIR/$ZIP_NAME" ./* -x "*.git*" "*.zip" >/dev/null 2>&1; then
           echo "::error::Failed to create ZIP package"
           exit 1
         fi
@@ -1238,14 +1256,6 @@ runs:
         echo "   Size: $(numfmt --to=iec-i --suffix=B "$ZIP_SIZE")"
         echo "   SHA256: $ZIP_SHA256"
         echo "::endgroup::"
-
-    - name: Upload Kernel Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{ steps.create_zip.outputs.zip_name }}
-        path: ${{ env.CONFIG }}/artifacts/${{ steps.create_zip.outputs.zip_name }}
-        retention-days: 30
-        if-no-files-found: error
 
     - name: Upload ZRAM Module (if enabled)
       if: ${{ inputs.enable_zram == 'true' && steps.zram_find.outputs.upload == 'true' }}
@@ -1314,3 +1324,4 @@ runs:
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "---" >> $GITHUB_STEP_SUMMARY
         echo "*Built with ❤️ using GitHub Actions*" >> $GITHUB_STEP_SUMMARY
+
