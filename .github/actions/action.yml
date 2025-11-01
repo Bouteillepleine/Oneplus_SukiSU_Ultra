@@ -51,6 +51,12 @@ outputs:
   zip_name:
     description: 'Created ZIP filename'
     value: ${{ steps.create_zip.outputs.zip_name }}
+  build_time:
+    description: 'Build time in seconds'
+    value: ${{ steps.collect_stats.outputs.build_time }}
+  ccache_hit_rate:
+    description: 'ccache hit rate percentage'
+    value: ${{ steps.ccache_stats.outputs.hit_rate }}
 
 runs:
   using: composite
@@ -148,9 +154,22 @@ runs:
     - name: Set Cache Environment
       shell: bash
       run: |
-        echo "CCACHE_DIR=$HOME/.ccache_${{ env.CONFIG }}" >> "$GITHUB_ENV"
-        echo "CCACHE_MAXSIZE=5G" >> "$GITHUB_ENV"
-        mkdir -p "$HOME/.ccache_${{ env.CONFIG }}"
+        set -euo pipefail
+        echo "::group::Configure ccache environment"
+        
+        # Shared cache directory across all devices
+        CACHE_DIR="$HOME/.ccache"
+        echo "CCACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
+        
+        # Increased cache size for better coverage
+        echo "CCACHE_MAXSIZE=20G" >> "$GITHUB_ENV"
+        
+        # Create cache directory
+        mkdir -p "$CACHE_DIR"
+        
+        echo "Cache directory: $CACHE_DIR (shared across devices)"
+        echo "Max cache size: 20G"
+        echo "::endgroup::"
 
     - name: Initialize and Sync Kernel Source
       shell: bash
@@ -235,34 +254,117 @@ runs:
         echo "   SUSFS Branch: gki-$ANDROID_VERSION-$VERSION.$PATCHLEVEL"
         echo "::endgroup::"
 
+    - name: Detect Clang
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Detect Clang"
+        KP="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
+        CLANG_FOUND=false
+        for base in "$KP/prebuilts" "$KP/prebuilts-master"; do
+          [ -d "$base/clang/host/linux-x86" ] || continue
+          latest=$(ls -d "$base"/clang/host/linux-x86/clang-r*/ 2>/dev/null | sort -V | tail -n1 || true)
+          if [ -n "$latest" ] && [ -x "$latest/bin/clang" ]; then
+            CLANG_BIN="$latest/bin"
+            CLANG_FOUND=true
+            break
+          fi
+        done
+        if ! $CLANG_FOUND && command -v clang >/dev/null 2>&1; then
+          CLANG_BIN="$(dirname "$(command -v clang)")"
+          CLANG_FOUND=true
+          echo "Using system clang."
+        fi
+        $CLANG_FOUND || { echo "::error::No clang toolchain found"; exit 1; }
+        echo "CLANG_BIN_PATH=$CLANG_BIN" >> "$GITHUB_ENV"
+        CLANG_VERSION="$("$CLANG_BIN/clang" --version | head -n1)"
+        echo "CLANG_VERSION=$CLANG_VERSION" >> "$GITHUB_ENV"
+        echo "✅ Detected Clang: $CLANG_VERSION"
+        echo "::endgroup::"
+
+    - name: Derive Clang Short Version
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Derive Clang fingerprint"
+        
+        # Try to extract clang-r version (e.g., "r510928" -> "510928")
+        short="$("${CLANG_BIN_PATH}/clang" --version | sed -n '1s/.*clang-r\([0-9.]\+\).*/\1/p')"
+        
+        # Fallback: use first 8 chars of version hash
+        if [ -z "$short" ]; then
+          short="$("${CLANG_BIN_PATH}/clang" --version | sha256sum | cut -c1-8)"
+          echo "⚠️ Could not extract clang-r version, using hash: $short"
+        else
+          echo "✅ Clang version fingerprint: $short"
+        fi
+        
+        echo "CLANG_VERSION_SHORT=$short" >> "$GITHUB_ENV"
+        
+        # Also save full version for reference
+        CLANG_FULL_VERSION="$("${CLANG_BIN_PATH}/clang" --version | head -n1)"
+        echo "CLANG_FULL_VERSION=$CLANG_FULL_VERSION" >> "$GITHUB_ENV"
+        
+        echo "Full Clang version: $CLANG_FULL_VERSION"
+        echo "::endgroup::"
+
     - name: Restore ccache
       uses: actions/cache@v4
       id: ccache-restore
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.CONFIG }}-kernel-${{ env.KERNEL_FULL_VER }}
+        # Shared key across devices with same Android/Kernel/Clang versions
+        key: ccache-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}
         restore-keys: |
-          ccache-${{ env.CONFIG }}-kernel-
+          ccache-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-
+          ccache-${{ env.ANDROID_VER }}-
+          ccache-
 
     - name: Configure ccache
       shell: bash
       run: |
         set -euo pipefail
+        echo "::group::Configure ccache settings"
+        
         export CCACHE_DIR="${{ env.CCACHE_DIR }}"
         export CCACHE_MAXSIZE="${{ env.CCACHE_MAXSIZE }}"
-        export CCACHE_COMPILERCHECK="none"
+        
+        # Core settings with content-based compiler verification
+        export CCACHE_COMPILERCHECK="content"
         export CCACHE_BASEDIR="${{ github.workspace }}"
         export CCACHE_NOHASHDIR="true"
         export CCACHE_HARDLINK="true"
+        
+        # Ignore volatile compiler options
+        export CCACHE_IGNOREOPTIONS="--sysroot* -fmacro-prefix-map=*"
+        
+        # Apply configuration
         mkdir -p "$CCACHE_DIR"
         ccache -M "$CCACHE_MAXSIZE"
         ccache -o compression=true
+        ccache -o compression_level=6
+        ccache -o direct_mode=true
+        ccache -o hash_dir=false
+        ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale,random_seed
+        
+        echo "✅ ccache configured successfully"
+        echo ""
         echo "ccache status (pre-build):"
         ccache -s
+        
         if [ "${{ steps.ccache-restore.outputs.cache-hit }}" = "true" ]; then
-          echo "ccache cache hit details:"
+          echo ""
+          echo "✅ Cache restored from: ${{ steps.ccache-restore.outputs.cache-matched-key }}"
+          echo ""
+          echo "Detailed cache statistics:"
           ccache -sv || true
+        else
+          echo ""
+          echo "⚠️ No cache hit - building from scratch"
+          echo "Cache will be populated for future builds (shared across devices)"
         fi
+        
+        echo "::endgroup::"
 
     - name: Clone AnyKernel3
       shell: bash
@@ -895,37 +997,9 @@ runs:
         KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
         cd "$KERNEL_PATH/common"
         mkdir -p out
-        CUSTOM_LOCALVERSION="-${{ env.ANDROID_VER }}-OP-UltraBolt"
+        CUSTOM_LOCALVERSION="-${{ env.ANDROID_VER }}-OP-⚡UltraBolt⚡"
         echo "CUSTOM_LOCALVERSION=$CUSTOM_LOCALVERSION" >> "$GITHUB_ENV"
         echo "Kernel branding: $CUSTOM_LOCALVERSION"
-
-    - name: Detect Clang
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::group::Detect Clang"
-        KP="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
-        CLANG_FOUND=false
-        for base in "$KP/prebuilts" "$KP/prebuilts-master"; do
-          [ -d "$base/clang/host/linux-x86" ] || continue
-          latest=$(ls -d "$base"/clang/host/linux-x86/clang-r*/ 2>/dev/null | sort -V | tail -n1 || true)
-          if [ -n "$latest" ] && [ -x "$latest/bin/clang" ]; then
-            CLANG_BIN="$latest/bin"
-            CLANG_FOUND=true
-            break
-          fi
-        done
-        if ! $CLANG_FOUND && command -v clang >/dev/null 2>&1; then
-          CLANG_BIN="$(dirname "$(command -v clang)")"
-          CLANG_FOUND=true
-          echo "Using system clang."
-        fi
-        $CLANG_FOUND || { echo "::error::No clang toolchain found"; exit 1; }
-        echo "CLANG_BIN_PATH=$CLANG_BIN" >> "$GITHUB_ENV"
-        CLANG_VERSION="$("$CLANG_BIN/clang" --version | head -n1)"
-        echo "CLANG_VERSION=$CLANG_VERSION" >> "$GITHUB_ENV"
-        echo "✅ Detected Clang: $CLANG_VERSION"
-        echo "::endgroup::"
 
     - name: Build Kernel
       shell: bash
@@ -941,34 +1015,51 @@ runs:
         
         export PYTHONWARNINGS="${PYTHONWARNINGS}"
         
+        # Deterministic build settings
         export SOURCE_DATE_EPOCH=1609459200
         export KBUILD_BUILD_TIMESTAMP="$(date -u -d @${SOURCE_DATE_EPOCH} '+%Y-%m-%d %H:%M:%S UTC')"
         export KBUILD_BUILD_USER="builder"
         export KBUILD_BUILD_HOST="github-actions"
         export KBUILD_BUILD_VERSION=1
         
+        # Configure PATH - ccache wrappers FIRST
+        export PATH="/usr/lib/ccache:$PATH"
+        
+        # Then add Clang to PATH
         if [ -n "${CLANG_BIN_PATH:-}" ] && [ -x "${CLANG_BIN_PATH}/clang" ]; then
           export PATH="${CLANG_BIN_PATH}:$PATH"
         fi
-
-        export PATH="/usr/lib/ccache:$PATH"
-        export CCACHE_COMPILERCHECK="none"
+        
+        # Verify ccache is in PATH
+        which ccache
+        which clang
+        
+        # Configure ccache for this build with content-based verification
+        export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+        export CCACHE_COMPILERCHECK="content"
         export CCACHE_BASEDIR="${{ github.workspace }}"
         export CCACHE_NOHASHDIR="true"
         export CCACHE_HARDLINK="true"
-        export CCACHE_DIR="${{ env.CCACHE_DIR }}"
-        export CCACHE_MAXSIZE="${{ env.CCACHE_MAXSIZE }}"
-        export CCACHE_SLOPPINESS="file_macro,time_macros,include_file_mtime,include_file_ctime"
-        export CCACHE_DEPEND=1
-        export CCACHE_DIRECT=1
-
+        export CCACHE_IGNOREOPTIONS="--sysroot* -fmacro-prefix-map=*"
+        
+        # Compiler settings - route through ccache
+        export HOSTCC="ccache clang"
+        export HOSTCXX="ccache clang++"
+        export CC="ccache clang"
+        
+        # Deterministic debug path mapping for better cache hits
+        MAP="-fdebug-prefix-map=${{ github.workspace }}=."
+        export KCFLAGS="${KCFLAGS:-} $MAP -no-canonical-prefixes"
+        export KCPPFLAGS="${KCPPFLAGS:-} $MAP"
+        
+        # Build configuration
         export LLVM=1 LLVM_IAS=1
         export ARCH=arm64 SUBARCH=arm64
         export CROSS_COMPILE=aarch64-linux-android-
         export CROSS_COMPILE_COMPAT=arm-linux-androideabi-
-        export LD=ld.lld HOSTLD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip HOSTCC=clang HOSTCXX=clang++
-        export CC="ccache clang"
-
+        export LD=ld.lld HOSTLD=ld.lld AR=llvm-ar NM=llvm-nm 
+        export OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+    
         OUT=out
         mkdir -p "$OUT"
         
@@ -994,14 +1085,16 @@ runs:
         scripts/config --file "$OUT/.config" -e LTO_CLANG_THIN
         scripts/config --file "$OUT/.config" -e LTO_CLANG
         
-        KCFLAGS="-Wno-error -pipe -fno-stack-protector ${KCFLAGS_EXTRA}"
-        KCPPFLAGS="-DCONFIG_OPTIMIZE_INLINING"
+        KCFLAGS="$KCFLAGS -Wno-error -pipe -fno-stack-protector ${KCFLAGS_EXTRA}"
+        KCPPFLAGS="$KCPPFLAGS -DCONFIG_OPTIMIZE_INLINING"
         
         make O="$OUT" olddefconfig
         
         echo "============================================"
         echo "🔧 Build Configuration Summary"
         echo "============================================"
+        echo "Device: ${OP_MODEL}"
+        echo "SoC: ${OP_SOC}"
         echo "Threads: $(nproc --all)"
         echo "Optimization: ${{ inputs.optimize_level }}"
         echo "KCFLAGS: $KCFLAGS"
@@ -1009,6 +1102,9 @@ runs:
         echo "Clang: ${CLANG_VERSION}"
         echo "Build Timestamp: $KBUILD_BUILD_TIMESTAMP"
         echo "SOURCE_DATE_EPOCH: $SOURCE_DATE_EPOCH"
+        echo "ccache: $(ccache --version | head -n1)"
+        echo "ccache dir: $CCACHE_DIR (shared)"
+        echo "Compiler check: content"
         echo "============================================"
         
         BUILD_START=$(date +%s)
@@ -1019,6 +1115,7 @@ runs:
         
         echo "BUILD_START=$BUILD_START" >> "$GITHUB_ENV"
         echo "BUILD_END=$BUILD_END" >> "$GITHUB_ENV"
+        echo "BUILD_TIME=$BUILD_TIME" >> "$GITHUB_ENV"
         
         IMG="$OUT/arch/arm64/boot/Image"
         if [ ! -f "$IMG" ]; then
@@ -1038,7 +1135,7 @@ runs:
         echo "Image Size: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")"
         echo "============================================"
         echo "::endgroup::"
-
+    
     - name: On failure - Summarize last error
       if: ${{ failure() }}
       shell: bash
@@ -1060,14 +1157,85 @@ runs:
         echo '```' >> "$GITHUB_STEP_SUMMARY"
         echo "::endgroup::"
 
-    - name: ccache post-build stats
+    - name: ccache Post-Build Statistics
+      id: ccache_stats
       if: always()
       shell: bash
       run: |
+        set -euo pipefail
         export CCACHE_DIR="${{ env.CCACHE_DIR }}"
-        echo "::group::ccache statistics"
-        ccache -s || true
+        
+        echo "::group::ccache final statistics"
+        ccache -s
+        echo ""
+        
+        # Calculate improvement with accurate parsing
+        echo "Cache effectiveness analysis:"
+        STATS="$(ccache -s)"
+        
+        # Parse cacheable calls and hits accurately
+        CACHEABLE=$(echo "$STATS" | awk -F': *' '/Cacheable calls/ {gsub(/ /,"",$2); print $2+0}')
+        HITS=$(echo "$STATS" | awk -F': *' '/(Direct cache hit|Preprocessed cache hit)/ {gsub(/ /,"",$2); sum+=$2} END {print sum+0}')
+        
+        if [ "${CACHEABLE:-0}" -gt 0 ]; then
+          HIT_RATE=$(awk -v h="$HITS" -v c="$CACHEABLE" 'BEGIN{printf "%.1f", (h/c)*100}')
+          echo "Hit Rate: ${HIT_RATE}% ($HITS/$CACHEABLE)"
+          echo "hit_rate=${HIT_RATE}%" >> "$GITHUB_OUTPUT"
+          
+          if (( $(echo "$HIT_RATE > 80" | bc -l) )); then
+            echo "✅ Excellent cache performance!"
+          elif (( $(echo "$HIT_RATE > 50" | bc -l) )); then
+            echo "✅ Good cache performance"
+          elif (( $(echo "$HIT_RATE > 20" | bc -l) )); then
+            echo "⚠️ Moderate cache performance"
+          else
+            echo "⚠️ Low cache performance (expected on first build)"
+          fi
+        else
+          echo "⚠️ No cacheable calls detected"
+          echo "hit_rate=0%" >> "$GITHUB_OUTPUT"
+        fi
+        
         echo "::endgroup::"
+        
+        # Add to GitHub summary
+        echo "## 📊 ccache Statistics" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        ccache -s >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${CACHEABLE:-0}" -gt 0 ]; then
+          # Get cache size
+          CACHE_SIZE=$(du -sh "$CCACHE_DIR" 2>/dev/null | cut -f1 || echo "unknown")
+          
+          echo "### Cache Performance" >> $GITHUB_STEP_SUMMARY
+          echo "- **Hit Rate:** ${HIT_RATE}%" >> $GITHUB_STEP_SUMMARY
+          echo "- **Hits:** $HITS" >> $GITHUB_STEP_SUMMARY
+          echo "- **Cacheable Calls:** $CACHEABLE" >> $GITHUB_STEP_SUMMARY
+          echo "- **Cache Size:** $CACHE_SIZE" >> $GITHUB_STEP_SUMMARY
+          echo "- **Scope:** Shared across all devices with same Android/Kernel/Clang versions" >> $GITHUB_STEP_SUMMARY
+          
+          # Add visual indicator (FIXED: single line)
+          if (( $(echo "$HIT_RATE > 80" | bc -l) )); then
+            echo "- **Status:** ✅ Excellent" >> $GITHUB_STEP_SUMMARY
+          elif (( $(echo "$HIT_RATE > 50" | bc -l) )); then
+            echo "- **Status:** ✅ Good" >> $GITHUB_STEP_SUMMARY
+          elif (( $(echo "$HIT_RATE > 20" | bc -l) )); then
+            echo "- **Status:** ⚠️ Moderate" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Status:** ⚠️ Low (first build)" >> $GITHUB_STEP_SUMMARY
+          fi
+        fi
+
+    - name: Save ccache
+      if: always()
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ env.CCACHE_DIR }}
+        # Shared key across devices with same Android/Kernel/Clang versions
+        key: ccache-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}
 
     - name: Save Build Metadata
       id: save_metadata
@@ -1167,13 +1335,18 @@ runs:
         
         IMG_SHA256=$(sha256sum "$IMG" | awk '{print $1}')
         
+        # Get build time
+        BUILD_TIME="${BUILD_TIME:-0}"
+        
         printf 'warnings_count=%s\n' "$WARNINGS_COUNT" >> "$GITHUB_OUTPUT"
         printf 'image_sha256=%s\n' "$IMG_SHA256" >> "$GITHUB_OUTPUT"
+        printf 'build_time=%s\n' "$BUILD_TIME" >> "$GITHUB_OUTPUT"
         
         echo "✅ Validation passed:"
         echo "   - Warnings: $WARNINGS_COUNT"
         echo "   - Image size: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")"
         echo "   - SHA256: $IMG_SHA256"
+        echo "   - Build time: ${BUILD_TIME}s"
 
     - name: Download and Package ZRAM Module
       if: ${{ inputs.enable_zram == 'true' }}
@@ -1231,8 +1404,8 @@ runs:
         fi
         
         if [ -n "$zram_path" ] && [ -f "$zram_path" ]; then
-          echo "ZRAM module found at: $zram_path
-                    mkdir -p "$(dirname "$target")"
+          echo "ZRAM module found at: $zram_path"
+          mkdir -p "$(dirname "$target")"
           if [ "$(realpath "$zram_path")" != "$(realpath "$target")" ]; then
             cp "$zram_path" "$target"
             echo "ZRAM module copied to package"
@@ -1416,11 +1589,15 @@ runs:
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 📊 Build Statistics" >> $GITHUB_STEP_SUMMARY
         
-        if [ -n "${BUILD_START:-}" ] && [ -n "${BUILD_END:-}" ]; then
-          BUILD_TIME=$((BUILD_END - BUILD_START))
+        if [ -n "${{ steps.collect_stats.outputs.build_time }}" ]; then
+          BUILD_TIME="${{ steps.collect_stats.outputs.build_time }}"
           BUILD_MIN=$((BUILD_TIME / 60))
           BUILD_SEC=$((BUILD_TIME % 60))
           echo "- **Build Time:** ${BUILD_MIN}m ${BUILD_SEC}s" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ -n "${{ steps.ccache_stats.outputs.hit_rate }}" ]; then
+          echo "- **ccache Hit Rate:** ${{ steps.ccache_stats.outputs.hit_rate }}" >> $GITHUB_STEP_SUMMARY
         fi
         
         if [ -n "${{ steps.collect_stats.outputs.warnings_count }}" ]; then
@@ -1449,9 +1626,9 @@ runs:
         
         echo "---" >> $GITHUB_STEP_SUMMARY
         echo "*Built with ❤️ using GitHub Actions*" >> $GITHUB_STEP_SUMMARY
+        echo "*Powered by ccache for faster builds* 🚀" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Build Configuration:**" >> $GITHUB_STEP_SUMMARY
         echo "- Branch: ${OP_BRANCH}" >> $GITHUB_STEP_SUMMARY
         echo "- Manifest: ${OP_MANIFEST}" >> $GITHUB_STEP_SUMMARY
         echo "- KSU Meta: ${{ inputs.ksu_meta }}" >> $GITHUB_STEP_SUMMARY
-
