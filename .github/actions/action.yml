@@ -761,6 +761,25 @@ runs:
         
         echo "::endgroup::"
 
+    - name: Patch KernelSU sulog time64_to_tm clash
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Patch KernelSU sulog compatibility"
+        KSP="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
+        f="$KSP/drivers/kernelsu/sulog.c"
+        
+        if [ -f "$f" ] && grep -q 'static inline void time64_to_tm' "$f"; then
+          echo "Found time64_to_tm conflict in sulog.c, applying patch..."
+          sed -i 's/static inline void time64_to_tm/static inline void ksu_time64_to_tm/' "$f"
+          sed -i 's/time64_to_tm(/ksu_time64_to_tm(/g' "$f"
+          echo "✅ Patched sulog.c to avoid time64_to_tm conflict"
+          echo "   Renamed: time64_to_tm → ksu_time64_to_tm"
+        else
+          echo "ℹ️ No local time64_to_tm helper found in $f; nothing to patch"
+        fi
+        echo "::endgroup::"
+
     - name: Apply ZRAM Patches
       if: ${{ inputs.enable_zram == 'true' }}
       shell: bash
@@ -800,7 +819,7 @@ runs:
         echo "::endgroup::"
 
     - name: Apply OGKI to GKI Conversion
-      if: ${{ env.KERNEL_VER == '6.6' && inputs.sched == 'false' }}
+      if: inputs.sched == 'true' && env.KERNEL_VER == '6.6' 
       shell: bash
       run: |
         set -euo pipefail
@@ -824,67 +843,21 @@ runs:
         
         echo "::endgroup::"
 
-    - name: Apply SCHED (Fengchi) Patches
-      if: ${{ env.KERNEL_VER == '6.6' && inputs.sched == 'true' }}
+    - name: Apply SCHED (Fengchi) patches
+      if: inputs.sched == 'true' && env.KERNEL_VER == '6.6'
       shell: bash
       run: |
         set -euo pipefail
-        echo "::group::Apply SCHED (Fengchi) patches"
-        cd "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
+        cd "$CONFIG/kernel_platform/common"
         
-        CPU="${{ env.OP_SOC }}"
-        DEVICE_CONFIG="${{ env.OP_MODEL }}"
+        curl -fL -o hmbird_patch.patch \
+          https://raw.githubusercontent.com/Numbersf/Action-Build/SukiSU-Ultra/patches/hmbird_patch.patch
         
-        echo "Cloning SCHED_PATCH repository (branch: $CPU)..."
-        if ! git clone https://github.com/Numbersf/SCHED_PATCH.git -b "$CPU" --depth=1; then
-          echo "::error::Failed to clone SCHED_PATCH repository"
-          exit 1
-        fi
+        grep -q 'hmbird_patch.o' drivers/Makefile || \
+          echo 'obj-y += hmbird_patch.o' >> drivers/Makefile
         
-        PATCH_FILE="fengchi_${DEVICE_CONFIG}.patch"
-        
-        if [ ! -f "./SCHED_PATCH/$PATCH_FILE" ]; then
-          echo "::error::Fengchi patch not found: $PATCH_FILE"
-          echo "Available patches:"
-          ls -la ./SCHED_PATCH/ || true
-          echo "❌ Fengchi kernel not supported for your device yet"
-          exit 1
-        fi
-        
-        cp "./SCHED_PATCH/$PATCH_FILE" ./
-        
-        if command -v dos2unix &> /dev/null; then
-          dos2unix "$PATCH_FILE"
-        fi
-        
-        echo "Applying Fengchi patch: $PATCH_FILE"
-        if patch -p1 -F 3 < "$PATCH_FILE"; then
-          echo "✅ Fengchi patch applied successfully"
-        else
-          echo "::warning::Fengchi patch applied with warnings"
-        fi
-        
-        echo "::endgroup::"
-
-    - name: Patch KernelSU sulog time64_to_tm clash
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::group::Patch KernelSU sulog compatibility"
-        KSP="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
-        f="$KSP/drivers/kernelsu/sulog.c"
-        
-        if [ -f "$f" ] && grep -q 'static inline void time64_to_tm' "$f"; then
-          echo "Found time64_to_tm conflict in sulog.c, applying patch..."
-          sed -i 's/static inline void time64_to_tm/static inline void ksu_time64_to_tm/' "$f"
-          sed -i 's/time64_to_tm(/ksu_time64_to_tm(/g' "$f"
-          echo "✅ Patched sulog.c to avoid time64_to_tm conflict"
-          echo "   Renamed: time64_to_tm → ksu_time64_to_tm"
-        else
-          echo "ℹ️ No local time64_to_tm helper found in $f; nothing to patch"
-        fi
-        echo "::endgroup::"
-
+        patch -p1 -F 3 < hmbird_patch.patch || true
+      
     - name: Configure Kernel
       shell: bash
       run: |
