@@ -309,7 +309,7 @@ runs:
         echo "::endgroup::"
 
     - name: Restore ccache
-      if: ${{ inputs.clean != 'true' }}  # ✅ Skip in clean mode
+      if: ${{ inputs.clean != 'true' }}
       uses: actions/cache@v4
       id: ccache-restore
       with:
@@ -321,12 +321,10 @@ runs:
           ccache-
 
     - name: Configure ccache
-      if: ${{ inputs.clean != 'true' }}  # ✅ Skip configuration in clean mode
+      if: ${{ inputs.clean != 'true' }}
       shell: bash
       run: |
         set -euo pipefail
-        echo "::group::Configure ccache settings"
-        
         export CCACHE_DIR="${{ env.CCACHE_DIR }}"
         export CCACHE_MAXSIZE="${{ env.CCACHE_MAXSIZE }}"
         
@@ -375,10 +373,10 @@ runs:
         echo "::group::Clean build requested"
         echo "⚠️ Clean build mode enabled - ccache will be bypassed"
         
-        # Disable ccache for this build (preserves shared cache for other jobs)
+        # Disable ccache for this build (preserves shared cache)
         echo "CCACHE_DISABLE=1" >> "$GITHUB_ENV"
         
-        # Zero statistics for reporting (doesn't affect cache content)
+        # Zero statistics for reporting (doesn't affect cache)
         export CCACHE_DIR="${{ env.CCACHE_DIR }}"
         ccache -z 2>/dev/null || true
         
@@ -1253,11 +1251,10 @@ runs:
         fi
 
     - name: Save ccache
-      if: always()
+      if: ${{ always() && inputs.clean != 'true' }} 
       uses: actions/cache/save@v4
       with:
         path: ${{ env.CCACHE_DIR }}
-        # Shared key across devices with same Android/Kernel/Clang versions
         key: ccache-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}
 
     - name: Save Build Metadata
