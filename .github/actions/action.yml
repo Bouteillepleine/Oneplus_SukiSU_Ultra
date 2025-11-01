@@ -1378,70 +1378,198 @@ runs:
       shell: bash
       continue-on-error: true
       run: |
-        set -e
+        set -euo pipefail
         echo "::group::Download and package ZRAM module"
-        echo "Fetching ZRAM module ZIP download link..."
-        retries=3
-        success=0
         
-        for i in $(seq 1 $retries); do
-          echo "Attempt $i of $retries..."
-          download_url=$(curl -s https://api.github.com/repos/Bouteillepleine/ZRAM-Module/releases/latest | \
-            grep "browser_download_url" | grep "ZRAM-Module-.*\.zip" | cut -d '"' -f 4 | head -n 1)
-    
+        echo "Fetching latest ZRAM module release..."
+        
+        # Retry logic for API call
+        retries=3
+        download_url=""
+        
+        for attempt in $(seq 1 $retries); do
+          echo "Attempt $attempt of $retries..."
+          
+          download_url=$(curl -fsSL --retry 3 --connect-timeout 30 \
+            "https://api.github.com/repos/Bouteillepleine/ZRAM-Module/releases/latest" 2>/dev/null | \
+            jq -r '.assets[] | select(.name | test("ZRAM-Module-.*\\.zip")) | .browser_download_url' | \
+            head -n 1 || true)
+          
           if [ -n "$download_url" ]; then
-            echo "Download URL: $download_url"
-            if wget -q "$download_url"; then
-              success=1
+            echo "Found download URL: $download_url"
+            break
+          fi
+          
+          if [ $attempt -lt $retries ]; then
+            echo "⚠️ Failed to get download URL, retrying in 5 seconds..."
+            sleep 5
+          fi
+        done
+        
+        if [ -z "$download_url" ]; then
+          echo "::warning::Failed to fetch ZRAM module download URL after $retries attempts"
+          echo "upload=false" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit 0
+        fi
+        
+        # Download ZRAM module ZIP
+        echo "Downloading ZRAM module from: $download_url"
+        
+        ZRAM_ZIP_NAME=$(basename "$download_url")
+        
+        if ! curl -fsSL --retry 3 --connect-timeout 30 -o "$ZRAM_ZIP_NAME" "$download_url"; then
+          echo "::warning::Failed to download ZRAM module ZIP"
+          echo "upload=false" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit 0
+        fi
+        
+        # Verify download
+        if [ ! -f "$ZRAM_ZIP_NAME" ]; then
+          echo "::warning::ZRAM module ZIP not found after download"
+          echo "upload=false" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit 0
+        fi
+        
+        ZIP_SIZE=$(stat -c%s "$ZRAM_ZIP_NAME")
+        if [ "$ZIP_SIZE" -lt 1024 ]; then
+          echo "::warning::Downloaded ZRAM ZIP is too small (${ZIP_SIZE} bytes)"
+          rm -f "$ZRAM_ZIP_NAME"
+          echo "upload=false" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit 0
+        fi
+        
+        echo "✅ ZRAM module ZIP downloaded successfully"
+        echo "   File: $ZRAM_ZIP_NAME"
+        echo "   Size: $(numfmt --to=iec-i --suffix=B "$ZIP_SIZE")"
+        
+        # Extract ZRAM module
+        echo "Extracting ZRAM module..."
+        
+        EXTRACT_DIR="ZRAM-Module-Extract"
+        mkdir -p "$EXTRACT_DIR"
+        
+        if ! unzip -q "$ZRAM_ZIP_NAME" -d "$EXTRACT_DIR"; then
+          echo "::warning::Failed to extract ZRAM module ZIP"
+          rm -rf "$EXTRACT_DIR"
+          echo "upload=false" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit 0
+        fi
+        
+        # Search for built zram.ko in kernel build output
+        echo "Searching for compiled zram.ko module..."
+        
+        CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
+        
+        search_paths=(
+          "$CONFIG_DIR/kernel_platform/common/out"
+          "$CONFIG_DIR/kernel_platform/out"
+          "$CONFIG_DIR/kernel_platform/common"
+          "$CONFIG_DIR/device/qcom"
+          "$CONFIG_DIR"
+        )
+        
+        zram_ko_path=""
+        
+        for search_path in "${search_paths[@]}"; do
+          if [ -d "$search_path" ]; then
+            echo "Searching in: $search_path"
+            zram_ko_path=$(find "$search_path" -type f -name "zram.ko" 2>/dev/null | head -n 1 || true)
+            
+            if [ -n "$zram_ko_path" ] && [ -f "$zram_ko_path" ]; then
+              echo "✅ Found zram.ko at: $zram_ko_path"
               break
             fi
           fi
-          
-          echo "Retry in 3 seconds..."
-          sleep 3
-        done
-    
-        if [ "$success" -ne 1 ]; then
-          echo "::warning::Failed to download ZRAM module after $retries attempts"
-          echo "upload=false" >> "$GITHUB_OUTPUT"
-          exit 0
-        fi
-    
-        unzip "$(ls -t ZRAM-Module-*.zip | head -1)" -d ZRAM-Module
-        target="./ZRAM-Module/zram/zram.ko"
-        
-        echo "Searching for zram.ko module file..."
-        search_paths=(
-          "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common/out"
-          "$GITHUB_WORKSPACE/$CONFIG/kernel_platform/out"
-          "$GITHUB_WORKSPACE/$CONFIG/device/qcom"
-        )
-        
-        zram_path=""
-        for path in "${search_paths[@]}"; do
-          zram_path=$(find "$path" -type f -name "zram.ko" 2>/dev/null | head -n 1)
-          [ -n "$zram_path" ] && break
         done
         
-        if [ -z "$zram_path" ]; then
-          zram_path=$(find "$GITHUB_WORKSPACE/$CONFIG" -type f -name "zram.ko" 2>/dev/null | head -n 1)
-        fi
-        
-        if [ -n "$zram_path" ] && [ -f "$zram_path" ]; then
-          echo "ZRAM module found at: $zram_path"
-          mkdir -p "$(dirname "$target")"
-          if [ "$(realpath "$zram_path")" != "$(realpath "$target")" ]; then
-            cp "$zram_path" "$target"
-            echo "ZRAM module copied to package"
-          else
-            echo "Source and target are the same, skipping copy"
-          fi
-          echo "upload=true" >> "$GITHUB_OUTPUT"
+        if [ -z "$zram_ko_path" ] || [ ! -f "$zram_ko_path" ]; then
+          echo "::warning::zram.ko module not found in kernel build output"
+          echo "::warning::ZRAM module will be packaged without compiled kernel module"
+          echo "upload=partial" >> "$GITHUB_OUTPUT"
         else
-          echo "zram.ko file not found in build output"
+          # Copy compiled zram.ko to ZRAM module package
+          TARGET_DIR="$EXTRACT_DIR/zram"
+          mkdir -p "$TARGET_DIR"
+          
+          echo "Copying compiled zram.ko to ZRAM module package..."
+          
+          if cp "$zram_ko_path" "$TARGET_DIR/zram.ko"; then
+            echo "✅ Compiled zram.ko copied successfully"
+            
+            KO_SIZE=$(stat -c%s "$TARGET_DIR/zram.ko")
+            KO_SHA256=$(sha256sum "$TARGET_DIR/zram.ko" | awk '{print $1}')
+            
+            echo "   Size: $(numfmt --to=iec-i --suffix=B "$KO_SIZE")"
+            echo "   SHA256: $KO_SHA256"
+            
+            echo "upload=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Failed to copy zram.ko to package"
+            echo "upload=partial" >> "$GITHUB_OUTPUT"
+          fi
+        fi
+        
+        # Repackage ZRAM module with compiled kernel module
+        echo "Creating final ZRAM module package..."
+        
+        FINAL_ZRAM_ZIP="ZRAM-Module-Packaged.zip"
+        
+        cd "$EXTRACT_DIR"
+        
+        if zip -r9 "../$FINAL_ZRAM_ZIP" ./* -x "*.git*" 2>&1 | tee /tmp/zram_zip.log; then
+          cd ..
+          
+          if [ -f "$FINAL_ZRAM_ZIP" ]; then
+            FINAL_SIZE=$(stat -c%s "$FINAL_ZRAM_ZIP")
+            FINAL_SHA256=$(sha256sum "$FINAL_ZRAM_ZIP" | awk '{print $1}')
+            
+            echo "✅ ZRAM module package created successfully"
+            echo "   File: $FINAL_ZRAM_ZIP"
+            echo "   Size: $(numfmt --to=iec-i --suffix=B "$FINAL_SIZE")"
+            echo "   SHA256: $FINAL_SHA256"
+            
+            # Copy to AnyKernel3 directory
+            if [ -d "$GITHUB_WORKSPACE/AnyKernel3" ]; then
+              echo "Copying ZRAM module to AnyKernel3 directory..."
+              
+              if cp "$FINAL_ZRAM_ZIP" "$GITHUB_WORKSPACE/AnyKernel3/"; then
+                echo "✅ ZRAM module copied to AnyKernel3"
+                ls -lh "$GITHUB_WORKSPACE/AnyKernel3/$FINAL_ZRAM_ZIP"
+              else
+                echo "::warning::Failed to copy ZRAM module to AnyKernel3"
+              fi
+            fi
+            
+            # Also copy to artifacts directory
+            ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
+            if [ -d "$ARTIFACTS_DIR" ]; then
+              echo "Copying ZRAM module to artifacts directory..."
+              
+              if cp "$FINAL_ZRAM_ZIP" "$ARTIFACTS_DIR/"; then
+                echo "✅ ZRAM module copied to artifacts"
+              fi
+            fi
+          else
+            echo "::warning::Final ZRAM ZIP not created"
+            echo "upload=false" >> "$GITHUB_OUTPUT"
+          fi
+        else
+          cd ..
+          echo "::warning::Failed to create final ZRAM module package"
+          cat /tmp/zram_zip.log || true
           echo "upload=false" >> "$GITHUB_OUTPUT"
         fi
-        echo "::endgroup::"
+        
+        # Cleanup
+        echo "Cleaning up temporary files..."
+        rm -rf "$EXTRACT_DIR" "$ZRAM_ZIP_NAME"
+        
+        echo "::endgroup::"    
 
     - name: Download SUSFS Module from CI
       shell: bash
@@ -1451,27 +1579,63 @@ runs:
       run: |
         set -euo pipefail
         echo "::group::Download SUSFS module"
-        echo "Downloading SUSFS module from CI..."
-        cd "$GITHUB_WORKSPACE/AnyKernel3"
         
+        echo "Fetching latest successful workflow run for branch v1.5.2+..."
         LATEST_RUN_ID=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
-          "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs?status=success" | \
+          "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs?status=success&per_page=50" | \
           jq -r '.workflow_runs[] | select(.head_branch == "v1.5.2+") | .id' | head -n 1)
         
         if [ -z "$LATEST_RUN_ID" ]; then
-          echo "⚠️ No successful run found for branch v1.5.2+"
-        else
-          ARTIFACT_URL=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
-            "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts" | \
-            jq -r '.artifacts[0].archive_download_url')
-          if [ -n "$ARTIFACT_URL" ] && [ "$ARTIFACT_URL" != "null" ]; then
-            curl -L -H "Authorization: Bearer $GITHUB_TOKEN" -o ksu_module_susfs_1.5.2+_CI.zip "$ARTIFACT_URL"
-            echo "✅ SUSFS module downloaded successfully"
-            ls -lh ksu_module_susfs_1.5.2+_CI.zip
-          else
-            echo "⚠️ Failed to fetch artifact URL"
-          fi
+          echo "⚠️ No successful workflow run found for branch v1.5.2+"
+          echo "::warning::SUSFS module will not be included in the kernel ZIP"
+          echo "::endgroup::"
+          exit 0
         fi
+        
+        echo "Found workflow run ID: $LATEST_RUN_ID"
+        echo "Fetching artifact download URL..."
+        
+        ARTIFACT_URL=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+          "https://api.github.com/repos/sidex15/susfs4ksu-module/actions/runs/$LATEST_RUN_ID/artifacts" | \
+          jq -r '.artifacts[0].archive_download_url // empty')
+        
+        if [ -z "$ARTIFACT_URL" ]; then
+          echo "⚠️ No artifact found in workflow run $LATEST_RUN_ID"
+          echo "::warning::SUSFS module will not be included in the kernel ZIP"
+          echo "::endgroup::"
+          exit 0
+        fi
+        
+        echo "Artifact URL: $ARTIFACT_URL"
+        echo "Downloading SUSFS module to AnyKernel3 directory..."
+        
+        # Download directly to AnyKernel3 directory
+        if curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" \
+             -o "$GITHUB_WORKSPACE/AnyKernel3/ksu_module_susfs_1.5.2+_CI.zip" "$ARTIFACT_URL"; then
+          
+          # Verify download
+          if [ -f "$GITHUB_WORKSPACE/AnyKernel3/ksu_module_susfs_1.5.2+_CI.zip" ]; then
+            FILE_SIZE=$(stat -c%s "$GITHUB_WORKSPACE/AnyKernel3/ksu_module_susfs_1.5.2+_CI.zip")
+            
+            if [ "$FILE_SIZE" -gt 1024 ]; then
+              echo "✅ SUSFS module downloaded successfully"
+              echo "   File: ksu_module_susfs_1.5.2+_CI.zip"
+              echo "   Size: $(numfmt --to=iec-i --suffix=B "$FILE_SIZE")"
+              ls -lh "$GITHUB_WORKSPACE/AnyKernel3/ksu_module_susfs_1.5.2+_CI.zip"
+            else
+              echo "⚠️ Downloaded file is too small (${FILE_SIZE} bytes)"
+              rm -f "$GITHUB_WORKSPACE/AnyKernel3/ksu_module_susfs_1.5.2+_CI.zip"
+              echo "::warning::SUSFS module download failed - file too small"
+            fi
+          else
+            echo "⚠️ Downloaded file not found"
+            echo "::warning::SUSFS module download failed - file missing"
+          fi
+        else
+          echo "⚠️ Failed to download SUSFS module"
+          echo "::warning::SUSFS module will not be included in the kernel ZIP"
+        fi
+        
         echo "::endgroup::"
 
     - name: Create Kernel ZIP
