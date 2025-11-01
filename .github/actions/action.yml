@@ -202,6 +202,17 @@ runs:
         echo "✅ Kernel source synced"
         echo "::endgroup::"
 
+    - name: Monitor Disk Space
+      if: always()
+      shell: bash
+      run: |
+        echo "::group::Disk Space Report"
+        df -h
+        echo ""
+        echo "Largest directories:"
+        du -sh "$GITHUB_WORKSPACE"/* 2>/dev/null | sort -rh | head -n 10 || true
+        echo "::endgroup::"
+
     - name: Get Kernel Version Info
       shell: bash
       run: |
@@ -413,9 +424,26 @@ runs:
         set -euo pipefail
         echo "::group::Clone AnyKernel3"
         ANYKERNEL_BRANCH="gki-2.0"
-        echo "Cloning AnyKernel3 (branch: $ANYKERNEL_BRANCH)..."
-        git clone --depth=1 https://github.com/Bouteillepleine/AnyKernel3.git -b "$ANYKERNEL_BRANCH"
-        echo "✅ AnyKernel3 cloned"
+        
+        MAX_RETRIES=3
+        for i in $(seq 1 $MAX_RETRIES); do
+          if git clone --depth=1 \
+            https://github.com/Bouteillepleine/AnyKernel3.git \
+            -b "$ANYKERNEL_BRANCH"; then
+            echo "✅ AnyKernel3 cloned successfully"
+            break
+          fi
+          
+          if [ $i -lt $MAX_RETRIES ]; then
+            echo "⚠️ Clone failed (attempt $i/$MAX_RETRIES), retrying in 5s..."
+            rm -rf AnyKernel3 2>/dev/null || true
+            sleep 5
+          else
+            echo "::error::Failed to clone AnyKernel3 after $MAX_RETRIES attempts"
+            exit 1
+          fi
+        done
+        
         echo "::endgroup::"
 
     - name: Clean Up ABI Protected Exports
@@ -1207,32 +1235,61 @@ runs:
         echo "::group::Build Failure Analysis"
         COMMON="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
         
-        echo "## 🔴 Build Failed - Last 120 Lines" >> "$GITHUB_STEP_SUMMARY"
-        echo "" >> "$GITHUB_STEP_SUMMARY"
-        echo '```' >> "$GITHUB_STEP_SUMMARY"
+        {
+          echo "## 🔴 Build Failed - Diagnostic Report"
+          echo ""
+          echo "### 📋 Build Configuration"
+          echo "- **Device:** ${OP_MODEL}"
+          echo "- **Kernel:** ${KERNEL_FULL_VER:-unknown}"
+          echo "- **Hook:** ${{ inputs.hook }}"
+          echo "- **Optimization:** ${{ inputs.optimize_level }}"
+          echo "- **Clean Build:** ${{ inputs.clean }}"
+          echo ""
+        } >> "$GITHUB_STEP_SUMMARY"
         
         if [ -f "$COMMON/build.log" ]; then
-          tail -n 120 "$COMMON/build.log" >> "$GITHUB_STEP_SUMMARY" || echo "Could not read build.log" >> "$GITHUB_STEP_SUMMARY"
-        else
-          echo "build.log not found" >> "$GITHUB_STEP_SUMMARY"
-        fi
-        
-        echo '```' >> "$GITHUB_STEP_SUMMARY"
-        echo "" >> "$GITHUB_STEP_SUMMARY"
-        
-        echo "### 🔍 Error Pattern Analysis" >> "$GITHUB_STEP_SUMMARY"
-        if [ -f "$COMMON/build.log" ]; then
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Fatal Errors:**" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          grep -i "fatal error:" "$COMMON/build.log" | tail -n 10 >> "$GITHUB_STEP_SUMMARY" || echo "None found" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # Categorize errors
+          FATAL_ERRORS=$(grep -c "fatal error:" "$COMMON/build.log" 2>/dev/null || echo "0")
+          UNDEFINED_REFS=$(grep -c "undefined reference" "$COMMON/build.log" 2>/dev/null || echo "0")
+          LINK_ERRORS=$(grep -c "ld.lld:" "$COMMON/build.log" 2>/dev/null || echo "0")
           
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Undefined References:**" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          grep -i "undefined reference" "$COMMON/build.log" | tail -n 10 >> "$GITHUB_STEP_SUMMARY" || echo "None found" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### 📊 Error Statistics"
+            echo "| Type | Count |"
+            echo "|------|-------|"
+            echo "| Fatal Errors | $FATAL_ERRORS |"
+            echo "| Undefined References | $UNDEFINED_REFS |"
+            echo "| Linker Errors | $LINK_ERRORS |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          
+          # Show last error context
+          LAST_ERROR_LINE=$(grep -n "error:" "$COMMON/build.log" 2>/dev/null | tail -n1 | cut -d: -f1)
+          
+          if [ -n "$LAST_ERROR_LINE" ]; then
+            START_LINE=$((LAST_ERROR_LINE - 20))
+            [ $START_LINE -lt 1 ] && START_LINE=1
+            
+            {
+              echo "### 🔍 Last Error Context (±20 lines)"
+              echo '```'
+              sed -n "${START_LINE},${LAST_ERROR_LINE}p" "$COMMON/build.log" | tail -n 40
+              echo '```'
+              echo ""
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          
+          # Show unique error patterns
+          {
+            echo "### 🎯 Unique Error Patterns"
+            echo '```'
+            grep -i "error:" "$COMMON/build.log" 2>/dev/null | \
+              sed 's/^.*error:/error:/i' | \
+              sort -u | head -n 20
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "⚠️ build.log not found" >> "$GITHUB_STEP_SUMMARY"
         fi
         
         echo "::endgroup::"
@@ -1317,24 +1374,42 @@ runs:
           exit 1
         fi
         
+        # Calculate SHA256
         SHA256=$(sha256sum "$IMG" | awk '{print $1}')
         echo "image_sha256=$SHA256" >> "$GITHUB_OUTPUT"
         echo "Image SHA256: $SHA256"
         
+        # Safe warnings count - no stdout pollution
+        WARNINGS=0
         if [ -f "$COMMON/build.log" ]; then
-          WARNINGS=$(grep -ciE '\bwarning:' "$COMMON/build.log" || echo "0")
-        else
-          WARNINGS="0"
+          # Capture in variable first, then validate
+          WARN_RAW=$(grep -ciE '\bwarning:' "$COMMON/build.log" 2>/dev/null || true)
+          if [[ "$WARN_RAW" =~ ^[0-9]+$ ]]; then
+            WARNINGS="$WARN_RAW"
+          fi
         fi
+        
         echo "warnings_count=$WARNINGS" >> "$GITHUB_OUTPUT"
         echo "Build warnings: $WARNINGS"
         
-        BUILD_TIME="${BUILD_TIME:-0}"
-        echo "build_time=$BUILD_TIME" >> "$GITHUB_OUTPUT"
-        echo "Build time: ${BUILD_TIME}s ($(($BUILD_TIME / 60))m $(($BUILD_TIME % 60))s)"
+        # Safe build time - always numeric
+        BT="${BUILD_TIME:-}"
+        if ! [[ "$BT" =~ ^[0-9]+$ ]]; then
+          BT=0
+        fi
         
+        echo "build_time=$BT" >> "$GITHUB_OUTPUT"
+        
+        if [ "$BT" -gt 0 ]; then
+          echo "Build time: ${BT}s ($((BT / 60))m $((BT % 60))s)"
+        else
+          echo "Build time: Not available"
+        fi
+        
+        # Image size
         IMG_SIZE=$(stat -c%s "$IMG")
         IMG_SIZE_MB=$((IMG_SIZE / 1024 / 1024))
+        echo "image_size_mb=$IMG_SIZE_MB" >> "$GITHUB_OUTPUT"
         echo "Image size: ${IMG_SIZE_MB}MB"
         
         echo "::endgroup::"
@@ -1385,6 +1460,7 @@ runs:
 
     - name: Create ZIP Package
       id: create_zip
+      if: success()
       shell: bash
       run: |
         set -euo pipefail
@@ -1393,16 +1469,36 @@ runs:
         COMMON="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
         IMG="$COMMON/out/arch/arm64/boot/Image"
         
+        # Validate Image exists
         if [ ! -f "$IMG" ]; then
           echo "::error::Kernel Image not found: $IMG"
+          exit 1
+        fi
+        
+        # Check image size
+        IMG_SIZE=$(stat -c%s "$IMG")
+        if [ "$IMG_SIZE" -lt 10000000 ]; then
+          echo "::warning::Kernel Image seems too small: $(numfmt --to=iec-i --suffix=B $IMG_SIZE)"
+        fi
+        
+        # Validate AnyKernel3 directory
+        if [ ! -d "$GITHUB_WORKSPACE/AnyKernel3" ]; then
+          echo "::error::AnyKernel3 directory not found"
           exit 1
         fi
         
         echo "Copying kernel Image to AnyKernel3..."
         cp "$IMG" "$GITHUB_WORKSPACE/AnyKernel3/Image"
         
+        # Verify copy succeeded
+        if ! cmp -s "$IMG" "$GITHUB_WORKSPACE/AnyKernel3/Image"; then
+          echo "::error::Image copy verification failed"
+          exit 1
+        fi
+        
         cd "$GITHUB_WORKSPACE/AnyKernel3"
         
+        # Build feature string
         FEATURES=""
         [ "${{ inputs.hook }}" != "manual" ] && FEATURES="${FEATURES}_$(echo ${{ inputs.hook }} | tr '[:lower:]' '[:upper:]')"
         [ "${{ inputs.enable_zram }}" = "true" ] && FEATURES="${FEATURES}_ZRAM"
@@ -1412,6 +1508,23 @@ runs:
         
         FEATURES="${FEATURES#_}"
         
+        # Validate required variables
+        if [ -z "${OP_MODEL:-}" ]; then
+          echo "::error::OP_MODEL not set"
+          exit 1
+        fi
+        
+        if [ -z "${KERNEL_FULL_VER:-}" ]; then
+          echo "::error::KERNEL_FULL_VER not set"
+          exit 1
+        fi
+        
+        if [ -z "${SUKISUVER:-}" ]; then
+          echo "::error::SUKISUVER not set"
+          exit 1
+        fi
+        
+        # Build ZIP name
         if [ -n "$FEATURES" ]; then
           ZIP_NAME="AnyKernel3_${OP_MODEL}_${KERNEL_FULL_VER}_SukiSU_${SUKISUVER}_${FEATURES}.zip"
         else
@@ -1420,22 +1533,50 @@ runs:
         
         echo "Creating ZIP: $ZIP_NAME"
         
-        zip -r9 "$ZIP_NAME" ./* -x "*.git*" -x "$ZIP_NAME" -x "*.md" -x "LICENSE"
+        # Remove old ZIP if exists
+        rm -f "$ZIP_NAME" 2>/dev/null || true
         
-        if [ ! -f "$ZIP_NAME" ]; then
+        # Create ZIP
+        if ! zip -r9 "$ZIP_NAME" ./* -x "*.git*" -x "$ZIP_NAME" -x "*.md" -x "LICENSE"; then
           echo "::error::Failed to create ZIP package"
           exit 1
         fi
         
+        # Validate ZIP was created
+        if [ ! -f "$ZIP_NAME" ]; then
+          echo "::error::ZIP file not created"
+          exit 1
+        fi
+        
+        # Test ZIP integrity
+        if ! unzip -t "$ZIP_NAME" >/dev/null 2>&1; then
+          echo "::error::ZIP integrity check failed"
+          exit 1
+        fi
+        
+        # Verify Image is in ZIP
+        if ! unzip -l "$ZIP_NAME" | grep -q "Image$"; then
+          echo "::error::Image not found in ZIP package"
+          exit 1
+        fi
+        
+        # Move to artifacts
         ARTIFACTS_DIR="$GITHUB_WORKSPACE/$CONFIG/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
         mv "$ZIP_NAME" "$ARTIFACTS_DIR/"
         
+        # Calculate ZIP metadata
         ZIP_SIZE=$(stat -c%s "$ARTIFACTS_DIR/$ZIP_NAME")
         ZIP_SIZE_MB=$((ZIP_SIZE / 1024 / 1024))
         ZIP_SHA256=$(sha256sum "$ARTIFACTS_DIR/$ZIP_NAME" | awk '{print $1}')
         
+        # Set outputs
         echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+        echo "zip_size=$ZIP_SIZE" >> "$GITHUB_OUTPUT"
+        echo "zip_size_mb=$ZIP_SIZE_MB" >> "$GITHUB_OUTPUT"
+        echo "zip_sha256=$ZIP_SHA256" >> "$GITHUB_OUTPUT"
+        
+        # Also set as env for other steps
         echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
         echo "ZIP_SIZE=$ZIP_SIZE" >> "$GITHUB_ENV"
         echo "ZIP_SIZE_MB=$ZIP_SIZE_MB" >> "$GITHUB_ENV"
@@ -1447,87 +1588,7 @@ runs:
         echo "   SHA256: $ZIP_SHA256"
         
         echo "::endgroup::"
-
-    - name: Generate Build Summary
-      if: always()
-      shell: bash
-      run: |
-        set -euo pipefail
-        
-        STATUS="${{ job.status }}"
-        [ "$STATUS" = "success" ] && EMOJI="✅" || EMOJI="❌"
-        
-        cat >> $GITHUB_STEP_SUMMARY << EOF
-        # $EMOJI Build Summary: ${OP_MODEL}
-        
-        ## 📊 Build Information
-        
-        | Property | Value |
-        |----------|-------|
-        | **Status** | $STATUS |
-        | **Device** | ${OP_MODEL} |
-        | **SoC** | ${OP_SOC} |
-        | **Kernel Version** | ${{ steps.save_metadata.outputs.kernel_version }} |
-        | **SukiSU Version** | v${{ steps.save_metadata.outputs.sukisu_version }} |
-        | **SUSFS Version** | ${{ steps.save_metadata.outputs.susfs_version }} |
-        
-        ## ⏱️ Performance Metrics
-        
-        | Metric | Value |
-        |--------|-------|
-        | **Build Time** | ${{ steps.collect_stats.outputs.build_time }}s ($((${{ steps.collect_stats.outputs.build_time }} / 60))m $((${{ steps.collect_stats.outputs.build_time }} % 60))s) |
-        | **ccache Hit Rate** | ${{ steps.ccache_stats.outputs.hit_rate }} |
-        | **Warnings** | ${{ steps.collect_stats.outputs.warnings_count }} |
-        
-        ## 📦 Output Package
-        
-        | Property | Value |
-        |----------|-------|
-        | **Filename** | \`${{ steps.create_zip.outputs.zip_name }}\` |
-        | **Size** | ${ZIP_SIZE_MB:-N/A}MB |
-        | **Image SHA256** | \`${{ steps.collect_stats.outputs.image_sha256 }}\` |
-        | **ZIP SHA256** | \`${ZIP_SHA256:-N/A}\` |
-        
-        ## ⚙️ Build Configuration
-        
-        | Setting | Value |
-        |---------|-------|
-        | **Hook Type** | \`${{ inputs.hook }}\` |
-        | **BBG LSM** | \`${{ inputs.lsm }}\` |
-        | **ZRAM** | \`${{ inputs.enable_zram }}\` |
-        | **Fengchi Scheduler** | \`${{ inputs.sched }}\` |
-        | **Optimization** | \`${{ inputs.optimize_level }}\` |
-        | **Clean Build** | \`${{ inputs.clean }}\` |
-        
-        ## 🔧 Compiler Information
-        
-        | Component | Version |
-        |-----------|---------|
-        | **Clang** | ${CLANG_FULL_VERSION:-N/A} |
-        | **Clang Fingerprint** | ${CLANG_VERSION_SHORT:-N/A} |
-        EOF
-        
-        if [ "${{ inputs.clean }}" != "true" ]; then
-          cat >> $GITHUB_STEP_SUMMARY << EOF
-        | **ccache** | Enabled |
-        | **Cache Directory** | \`${{ env.CCACHE_DIR }}\` |
-        | **Max Cache Size** | ${{ env.CCACHE_MAXSIZE }} |
-        EOF
-        else
-          cat >> $GITHUB_STEP_SUMMARY << EOF
-        | **ccache** | Disabled (clean build) |
-        EOF
-        fi
-        
-        cat >> $GITHUB_STEP_SUMMARY << EOF
-        
-        ---
-        
-        **Build Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')  
-        **Workflow Run:** #${{ github.run_number }}  
-        **Triggered by:** @${{ github.actor }}
-        EOF
-
+    
     - name: Upload Build Artifacts Summary
       if: always()
       shell: bash
