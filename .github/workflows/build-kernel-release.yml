@@ -221,14 +221,13 @@ jobs:
           **Config:** Hook=\`${{ inputs.hook }}\` LSM=\`${{ inputs.lsm }}\` ZRAM=\`${{ inputs.enable_zram }}\` Opt=\`${{ inputs.optimize_level }}\`
           EOF
 
-      - name: Upload
+      - name: Upload Kernel ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-${{ matrix.model }}-${{ matrix.android_version }}-${{ matrix.kernel_version }}
-          path: |
-            ${{ matrix.model }}/artifacts/*.zip
-            ${{ matrix.model }}/artifacts/*.txt
+          name: ${{ steps.build.outputs.zip_name }}
+          path: ${{ matrix.model }}/artifacts/${{ steps.build.outputs.zip_name }}
           retention-days: 30
+          compression-level: 0
           if-no-files-found: error
 
   release:
@@ -237,7 +236,7 @@ jobs:
     if: ${{ inputs.make_release }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      RELEASE_NAME: '*TEST* OnePlus Kernels - SukiSU Ultra & SUSFS v1.5.12 *TEST*'
+      RELEASE_NAME: 'OnePlus Kernels - SukiSU Ultra & SUSFS v1.5.12'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -258,6 +257,8 @@ jobs:
           fi
           
           echo "NEW_TAG=$NEW_TAG" >> $GITHUB_ENV
+          echo "📌 Generated tag: $NEW_TAG"
+          
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag -a "$NEW_TAG" -m "Release $NEW_TAG"
@@ -268,80 +269,199 @@ jobs:
         with:
           path: ./artifacts
 
-      - name: Generate Notes
+      - name: Organize Artifacts
+        run: |
+          echo "::group::Organize downloaded artifacts"
+          
+          # GitHub Actions downloads artifacts into subdirectories
+          # We need to flatten them
+          mkdir -p release_zips
+          
+          find artifacts -name "*.zip" -type f | while read zip; do
+            filename=$(basename "$zip")
+            echo "Found: $filename"
+            cp "$zip" "release_zips/$filename"
+          done
+          
+          ZIP_COUNT=$(find release_zips -name "*.zip" -type f | wc -l)
+          echo "✅ Organized $ZIP_COUNT ZIP file(s)"
+          
+          if [ "$ZIP_COUNT" -eq 0 ]; then
+            echo "::error::No ZIP files found in artifacts!"
+            exit 1
+          fi
+          
+          ls -lh release_zips/
+          echo "::endgroup::"
+
+      - name: Generate Release Notes
         run: |
           cat << EOF > notes.md
-          SukiSU Ultra with SUSFS v1.5.12
+          # 🎉 SukiSU Ultra with SUSFS v1.5.12
           
-          **Module:** https://github.com/sidex15/ksu_module_susfs  
-          **Manager:** https://github.com/SukiSU-Ultra/SukiSU-Ultra  
+          **SUSFS Module:** https://github.com/sidex15/ksu_module_susfs  
+          **SukiSU Manager:** https://github.com/SukiSU-Ultra/SukiSU-Ultra  
           
-          ### Built Devices
-          | Model | Version |
-          |-------|---------|
+          ## 📱 Built Devices
+          
+          | Model | Kernel Version | SukiSU Version | Hook Type |
+          |-------|----------------|----------------|-----------|
           EOF
           
-          find artifacts -name "*.txt" -type f | sort | while read f; do
-            printf "| %-12s | %-16s |\n" "$(basename "$f" .txt)" "$(cat "$f")" >> notes.md
+          # Parse ZIP filenames to extract build info
+          find release_zips -name "AnyKernel3_*.zip" -type f | sort | while read zip; do
+            filename=$(basename "$zip" .zip)
+            
+            # Pattern: AnyKernel3_MODEL_KERNEL-VERSION_SukiSU_VERSION_HOOK_EXTRAS.zip
+            if [[ "$filename" =~ AnyKernel3_([^_]+)_([^_]+)_SukiSU_([^_]+)_([A-Z]+) ]]; then
+              model="${BASH_REMATCH[1]}"
+              kernel="${BASH_REMATCH[2]}"
+              sukisu="${BASH_REMATCH[3]}"
+              hook="${BASH_REMATCH[4]}"
+              echo "| $model | $kernel | v$sukisu | $hook |" >> notes.md
+            elif [[ "$filename" =~ AnyKernel3_([^_]+)_([^_]+)_SukiSU_([^_]+) ]]; then
+              model="${BASH_REMATCH[1]}"
+              kernel="${BASH_REMATCH[2]}"
+              sukisu="${BASH_REMATCH[3]}"
+              echo "| $model | $kernel | v$sukisu | Default |" >> notes.md
+            fi
           done
           
           cat << 'EOF' >> notes.md
           
-          ### Features
-          - SukiSU Ultra Manager
-          - SUSFS v1.5.12
-          - Wireguard
-          - Magic Mount
-          - Ptrace fix (<5.16)
-          - Manual/Kprobe/Tracepoint Hooks
-          - TMPFS_XATTR [Mountify]
-          - BBR v1
-          - HMBIRD scx (6.6)
-          - BBG (optional)
-          - ZRAM algorithms (optional)
-          - IP Set
+          ## ✨ Features
+          
+          ### Core Components
+          - ⚡ **SukiSU Ultra Manager** - Enhanced KernelSU manager
+          - 🛡️ **SUSFS v1.5.12** - Kernel-level root hiding (module included in ZIP)
+          - 🔐 **Magic Mount** - Seamless file system modifications
+          - 🔧 **Ptrace Fix** - For kernels < 5.16
+          
+          ### Hook Types
+          - 🎯 **Manual (VFS)** - Direct VFS hooks (default)
+          - 🔍 **Kprobe** - Dynamic kernel probing
+          - 📊 **Tracepoint** - Kernel tracepoint hooks
+          
+          ### Network & Security
+          - 🌐 **Wireguard** - Modern VPN protocol
+          - 🔥 **IP Set** - Advanced firewall rules
+          - 📈 **BBR v1** - TCP congestion control
+          - 🛡️ **BBG LSM** - Optional security module
+          
+          ### Performance
+          - 💾 **ZRAM Algorithms** - Optional memory compression
+          - ⚙️ **TMPFS_XATTR** - Mountify support
+          - 🚀 **HMBIRD scx** - Scheduler (6.6 kernels)
+          - 🎯 **Optimization Levels** - O2/O3 compiler flags
+          
+          ## 📦 Installation
+          
+          1. **Download** the ZIP for your device
+          2. **Boot** into recovery (TWRP/OrangeFox)
+          3. **Flash** the kernel ZIP
+          4. **Reboot** and install SukiSU Manager
+          5. **Install** SUSFS module from `/sdcard/` (automatically extracted)
+          
+          ## ⚠️ Important Notes
+          
+          - **SUSFS module** is included in the kernel ZIP and will be extracted to `/sdcard/`
+          - Install the SUSFS module **after** flashing the kernel
+          - Use **SukiSU Ultra Manager** for best compatibility
+          - Backup your data before flashing
+          
+          ## 🐛 Troubleshooting
+          
+          - If bootloop occurs, flash stock kernel in recovery
+          - Check Magisk/KernelSU conflicts before installation
+          - Ensure your device matches the kernel model
+          
+          ## 📝 Build Configuration
+          
+          - **Hook Type:** ${{ inputs.hook }}
+          - **BBG LSM:** ${{ inputs.lsm }}
+          - **ZRAM:** ${{ inputs.enable_zram }}
+          - **Optimization:** ${{ inputs.optimize_level }}
+          
+          ---
+          
+          **Built with ❤️ by GitHub Actions**
           EOF
+          
+          echo "✅ Release notes generated"
+          cat notes.md
 
       - name: Create Release
         run: |
+          echo "Creating release: ${{ env.NEW_TAG }}"
+          
           for i in {1..3}; do
-            gh release create "${{ env.NEW_TAG }}" \
+            if gh release create "${{ env.NEW_TAG }}" \
               --repo "${{ github.repository }}" \
               --title "${{ env.RELEASE_NAME }}" \
               --notes-file notes.md \
-              --prerelease && exit 0
-            echo "Retry $i/3..."
+              --prerelease; then
+              echo "✅ Release created successfully"
+              exit 0
+            fi
+            echo "⚠️ Retry $i/3..."
             sleep 5
           done
+          
+          echo "::error::Failed to create release after 3 attempts"
           exit 1
 
-      - name: Upload Assets
+      - name: Upload Release Assets
         run: |
-          find artifacts -name "*.zip" -type f | while read zip; do
-            name=$(basename "$zip")
+          echo "::group::Upload kernel ZIPs to release"
+          
+          SUCCESS_COUNT=0
+          FAIL_COUNT=0
+          
+          find release_zips -name "*.zip" -type f | sort | while read zip; do
+            filename=$(basename "$zip")
+            echo "Uploading: $filename"
             
             for i in {1..3}; do
               if gh release upload "${{ env.NEW_TAG }}" "$zip" \
-                 --repo "${{ github.repository }}" --clobber; then
-                echo "✅ $name"
+                 --repo "${{ github.repository }}" \
+                 --clobber; then
+                echo "  ✅ $filename uploaded"
+                ((SUCCESS_COUNT++))
                 break
               fi
-              echo "⚠️ Retry $i/3: $name"
-              sleep 5
+              
+              if [ $i -lt 3 ]; then
+                echo "  ⚠️ Retry $i/3 for $filename"
+                sleep 5
+              else
+                echo "  ❌ Failed to upload $filename"
+                ((FAIL_COUNT++))
+              fi
             done
           done
           
-          # Simple verification
-          uploaded=$(gh release view "${{ env.NEW_TAG }}" \
+          echo "::endgroup::"
+          
+          # Verify uploads
+          echo "::group::Verify uploaded assets"
+          
+          UPLOADED_COUNT=$(gh release view "${{ env.NEW_TAG }}" \
             --repo "${{ github.repository }}" \
             --json assets --jq '.assets | length')
           
-          echo "✅ Release has $uploaded asset(s)"
+          echo "✅ Release has $UPLOADED_COUNT asset(s)"
           
-          if [ "$uploaded" -eq 0 ]; then
-            echo "::error::No assets in release!"
+          if [ "$UPLOADED_COUNT" -eq 0 ]; then
+            echo "::error::No assets uploaded to release!"
             exit 1
           fi
+          
+          # List all assets
+          gh release view "${{ env.NEW_TAG }}" \
+            --repo "${{ github.repository }}" \
+            --json assets --jq '.assets[] | "- \(.name) (\(.size) bytes)"'
+          
+          echo "::endgroup::"
 
       - name: Release Summary
         if: always()
@@ -350,13 +470,27 @@ jobs:
           # 🎉 Release: ${{ env.NEW_TAG }}
           
           **Status:** ${{ job.status }}  
-          **URL:** https://github.com/${{ github.repository }}/releases/tag/${{ env.NEW_TAG }}
+          **Release URL:** https://github.com/${{ github.repository }}/releases/tag/${{ env.NEW_TAG }}
           
-          ## Assets
-          | File | Size |
-          |------|------|
+          ## 📦 Uploaded Assets
+          
+          | Filename | Size | SHA256 |
+          |----------|------|--------|
           EOF
           
-          find artifacts -name "*.zip" -type f | while read f; do
-            echo "| \`$(basename "$f")\` | $(stat -c%s "$f" | numfmt --to=iec-i --suffix=B) |" >> $GITHUB_STEP_SUMMARY
+          find release_zips -name "*.zip" -type f | sort | while read zip; do
+            filename=$(basename "$zip")
+            size=$(stat -c%s "$zip" | numfmt --to=iec-i --suffix=B)
+            sha256=$(sha256sum "$zip" | awk '{print substr($1,1,16) "..."}')
+            echo "| \`$filename\` | $size | \`$sha256\` |" >> $GITHUB_STEP_SUMMARY
           done
+          
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          
+          ## 🔗 Quick Links
+          
+          - [📥 Download Release](https://github.com/${{ github.repository }}/releases/tag/${{ env.NEW_TAG }})
+          - [📋 All Releases](https://github.com/${{ github.repository }}/releases)
+          - [🔧 SUSFS Module](https://github.com/sidex15/ksu_module_susfs)
+          - [📱 SukiSU Manager](https://github.com/SukiSU-Ultra/SukiSU-Ultra)
+          EOF
