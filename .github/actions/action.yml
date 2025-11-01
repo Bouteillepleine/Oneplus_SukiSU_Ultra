@@ -755,6 +755,26 @@ runs:
         echo "✅ ZRAM sources and patches applied"
         echo "::endgroup::"
 
+    # 🆕 NEW STEP: Patch KernelSU sulog time64_to_tm clash
+    - name: Patch KernelSU sulog time64_to_tm clash (5.15/6.1)
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Patch KernelSU sulog compatibility"
+        KSP="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
+        f="$KSP/drivers/kernelsu/sulog.c"
+        
+        if [ -f "$f" ] && grep -q 'static inline void time64_to_tm' "$f"; then
+          echo "Found time64_to_tm conflict in sulog.c, applying patch..."
+          sed -i 's/static inline void time64_to_tm/static inline void ksu_time64_to_tm/' "$f"
+          sed -i 's/time64_to_tm(/ksu_time64_to_tm(/g' "$f"
+          echo "✅ Patched sulog.c to avoid time64_to_tm conflict"
+          echo "   Renamed: time64_to_tm → ksu_time64_to_tm"
+        else
+          echo "ℹ️ No local time64_to_tm helper found in $f; nothing to patch"
+        fi
+        echo "::endgroup::"
+
     - name: Configure Kernel
       shell: bash
       run: |
@@ -1042,6 +1062,37 @@ runs:
         echo "============================================"
         echo "::endgroup::"
 
+    # 🆕 NEW STEP: On failure - Summarize last error
+    - name: On failure - Summarize last error
+      if: ${{ failure() }}
+      shell: bash
+      run: |
+        set +e  # Don't fail if log doesn't exist
+        echo "::group::Build Failure Analysis"
+        COMMON="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
+        
+        echo "## 🔴 Build Failed - Last 120 Lines" >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo '```' >> "$GITHUB_STEP_SUMMARY"
+        
+        if [ -f "$COMMON/build.log" ]; then
+          tail -n 120 "$COMMON/build.log" >> "$GITHUB_STEP_SUMMARY"
+        elif [ -f "$COMMON/out/build.log" ]; then
+          tail -n 120 "$COMMON/out/build.log" >> "$GITHUB_STEP_SUMMARY"
+        else
+          echo "build.log not available at expected locations:" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - $COMMON/build.log" >> "$GITHUB_STEP_SUMMARY"
+          echo "  - $COMMON/out/build.log" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Attempting to capture from workflow output..." >> "$GITHUB_STEP_SUMMARY"
+        fi
+        
+        echo '```' >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "---" >> "$GITHUB_STEP_SUMMARY"
+        echo "*Check the full build log above for complete error context*" >> "$GITHUB_STEP_SUMMARY"
+        echo "::endgroup::"
+
     - name: ccache post-build stats
       if: always()
       shell: bash
@@ -1127,6 +1178,8 @@ runs:
         SUSFS_VERSION="${SUSFS_VERSION:-unknown}"
         
         # Export to GitHub Output (CRITICAL: use >> not >)
+        echo "kernel_version=${KERNEL_VERSION}"
+                # Export to GitHub Output (CRITICAL: use >> not >)
         echo "kernel_version=${KERNEL_VERSION}" >> "$GITHUB_OUTPUT"
         echo "sukisu_version=${SUKISU_VERSION}" >> "$GITHUB_OUTPUT"
         echo "susfs_version=${SUSFS_VERSION}" >> "$GITHUB_OUTPUT"
@@ -1201,6 +1254,8 @@ runs:
         echo "Fetching ZRAM module ZIP download link..."
         retries=3
         success=0
+        
+        # 🔧 FIXED: Single clean for loop
         for i in $(seq 1 $retries); do
           echo "Attempt $i of $retries..."
           download_url=$(curl -s https://api.github.com/repos/Bouteillepleine/ZRAM-Module/releases/latest | \
