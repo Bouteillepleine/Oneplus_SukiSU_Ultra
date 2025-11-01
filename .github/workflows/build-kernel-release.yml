@@ -168,6 +168,19 @@ jobs:
           optimize_level: ${{ inputs.optimize_level }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Debug Outputs
+        if: always()
+        shell: bash
+        run: |
+          echo "::group::Build Output Values"
+          echo "kernel_version: '${{ steps.build.outputs.kernel_version }}'"
+          echo "sukisu_version: '${{ steps.build.outputs.sukisu_version }}'"
+          echo "susfs_version: '${{ steps.build.outputs.susfs_version }}'"
+          echo "image_sha256: '${{ steps.build.outputs.image_sha256 }}'"
+          echo "warnings_count: '${{ steps.build.outputs.warnings_count }}'"
+          echo "zip_name: '${{ steps.build.outputs.zip_name }}'"
+          echo "::endgroup::"
+
       - name: Validate
         if: always()
         shell: bash
@@ -177,7 +190,8 @@ jobs:
             case "$out" in
               kernel_version) v="${{ steps.build.outputs.kernel_version }}" ;;
               sukisu_version) v="${{ steps.build.outputs.sukisu_version }}" ;;
-              susfs_version) v="${{ steps.build.outputs.susfs_version }}" ;;              
+              susfs_version) v="${{ steps.build.outputs.susfs_version }}" ;;
+              image_sha256) v="${{ steps.build.outputs.image_sha256 }}" ;;
               warnings_count) v="${{ steps.build.outputs.warnings_count }}" ;;
               zip_name) v="${{ steps.build.outputs.zip_name }}" ;;
             esac
@@ -200,6 +214,7 @@ jobs:
           | Kernel | ${{ steps.build.outputs.kernel_version }} |
           | SukiSU | ${{ steps.build.outputs.sukisu_version }} |
           | SUSFS | ${{ steps.build.outputs.susfs_version }} |
+          | SHA256 | \`${{ steps.build.outputs.image_sha256 }}\` |
           | Warnings | ${{ steps.build.outputs.warnings_count }} |
           | Package | \`${{ steps.build.outputs.zip_name }}\` |
           
@@ -213,7 +228,7 @@ jobs:
           path: |
             ${{ matrix.model }}/artifacts/*.zip
             ${{ matrix.model }}/artifacts/*.txt
-          retention-days: 7
+          retention-days: 30
           if-no-files-found: error
 
   release:
