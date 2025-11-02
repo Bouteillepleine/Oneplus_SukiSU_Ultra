@@ -1,5 +1,4 @@
 name: 'Build OnePlus Kernel with SukiSU'
-description: 'Builds OnePlus kernel with KernelSU/SukiSU and SUSFS support'
 
 inputs:
   op_config_json:
@@ -251,7 +250,7 @@ runs:
         ccache --set-config=compiler_check=content
         
         ccache -z
-        ccache -p | grep -E "(max_size|cache_dir|base_dir|compression|direct_mode|sloppiness|compiler_check)"
+        ccache -p | grep -iE "(max_size|cache_dir|base_dir|compression|direct_mode|sloppiness|compiler_check)" || true
         
         echo "✅ ccache configured"
         echo "::endgroup::"
@@ -473,7 +472,7 @@ EOF
           clang --version 2>&1 | head -n1 || true
           echo ""
           echo "ccache configuration:"
-          ccache -p | grep -E "(compression|direct_mode|readonly_direct|depend|sloppiness)" || true
+          ccache -p | grep -iE "(compression|direct_mode|readonly_direct|depend|sloppiness|compiler_check)" || true
           echo ""
           echo "ccache pre-build status:"
           ccache -s | head -n 20
@@ -522,7 +521,7 @@ EOF
           echo "  Base: $CCACHE_BASEDIR"
           echo "  Max size: $CCACHE_MAXSIZE"
           echo "  Compression: zstd level 3"
-          echo "  Features: readonly_direct, file_clone, inode_cache, depend"
+          echo "  Features: readonly_direct, file_clone, inode_cache, depend_mode, compiler_check=content"
         else
           echo "ccache: DISABLED"
         fi
@@ -1200,4 +1199,4 @@ EOF
         
         if [ -n "${{ steps.ccache_stats.outputs.hit_rate }}" ]; then
           echo "- **ccache Hit Rate:** ${{ steps.ccache_stats.outputs.hit_rate }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **ccache Direct Rate:** ${{ steps.ccache_stats.outputs.direct_rate }}" >> $GITHUB_STEP_
+          echo "- **ccache Direct Rate:** ${{ steps
