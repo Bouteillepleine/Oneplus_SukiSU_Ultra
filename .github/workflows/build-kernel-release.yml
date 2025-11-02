@@ -161,7 +161,6 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      max-parallel: 26
       matrix: ${{ fromJSON(needs.set-op-model.outputs.matrix) }}
     steps:
       - name: Checkout
@@ -272,14 +271,14 @@ jobs:
           compression-level: 0
           if-no-files-found: error
 
+  # ✅ FIXED: Proper job-level indentation (same level as 'build' and 'set-op-model')
   release:
     needs: build
     runs-on: ubuntu-latest
     if: ${{ inputs.make_release && github.ref == 'refs/heads/main' }}
     env:
-      GH_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ secrets.PAT_TOKEN }}
       RELEASE_NAME: 'OnePlus Kernels - SukiSU Ultra & SUSFS v1.5.12'
-    
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -306,16 +305,34 @@ jobs:
           
           echo "::endgroup::"
       
-      - name: Verify GitHub CLI Authentication
+      - name: Validate PAT Token
+        shell: bash
         run: |
-          echo "✅ GitHub CLI version:"
-          gh --version
-          echo ""
-          echo "✅ Authentication status:"
-          gh auth status
-      
+          set -euo pipefail
+          
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::GH_TOKEN not set. Please add PAT_TOKEN secret."
+            echo "::error::"
+            echo "::error::Required setup:"
+            echo "::error::1. Go to Settings → Developer settings → Personal access tokens → Fine-grained tokens"
+            echo "::error::2. Generate new token with:"
+            echo "::error::   - Repository access: Only select repositories → vbn"
+            echo "::error::   - Permissions:"
+            echo "::error::     • Contents: Read and write"
+            echo "::error::     • Workflows: Read and write"
+            echo "::error::3. Add to repository secrets as PAT_TOKEN"
+            exit 1
+          fi
+          
+          echo "Validating token scopes..."
+          if gh auth status 2>&1 | grep -q "Token:"; then
+            echo "✅ PAT token is valid"
+          else
+            echo "::error::PAT token validation failed"
+            exit 1
+          fi
+          
       - name: Generate and Push Release Tag
-        id: tag  # ✅ Added ID for output reference
         shell: bash
         run: |
           set -euo pipefail
@@ -348,23 +365,18 @@ jobs:
             fi
           fi
           
-          # ✅ Export to both GITHUB_ENV and GITHUB_OUTPUT
           echo "NEW_TAG=${NEW_TAG}" >> "${GITHUB_ENV}"
-          echo "new_tag=${NEW_TAG}" >> "${GITHUB_OUTPUT}"
           echo "📌 Generated tag: ${NEW_TAG}"
           
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # ✅ Initialize TAG_EXISTS with default value
-          TAG_EXISTS="false"
-          
           if git rev-parse -q --verify "refs/tags/${NEW_TAG}" >/dev/null 2>&1; then
             echo "::warning::Tag ${NEW_TAG} already exists locally"
-            TAG_EXISTS="true"
+            echo "TAG_EXISTS=true" >> "${GITHUB_ENV}"
           elif git ls-remote --tags origin "${NEW_TAG}" | grep -q "refs/tags/${NEW_TAG}$"; then
             echo "::warning::Tag ${NEW_TAG} already exists on remote"
-            TAG_EXISTS="true"
+            echo "TAG_EXISTS=true" >> "${GITHUB_ENV}"
           else
             RELEASE_MSG="Release ${NEW_TAG}
           
@@ -378,12 +390,10 @@ jobs:
             
             echo "Pushing tag to remote repository..."
             MAX_RETRIES=3
-            PUSH_SUCCESS="false"
-            
             for i in $(seq 1 ${MAX_RETRIES}); do
               if git push origin "refs/tags/${NEW_TAG}"; then
                 echo "✅ Tag ${NEW_TAG} pushed successfully"
-                PUSH_SUCCESS="true"
+                echo "TAG_EXISTS=false" >> "${GITHUB_ENV}"
                 break
               fi
               
@@ -391,23 +401,16 @@ jobs:
                 echo "⚠️ Push failed (attempt ${i}/${MAX_RETRIES}), retrying in 5s..."
                 sleep 5
               else
-                # Check if tag was created by another process
                 if git ls-remote --tags origin "${NEW_TAG}" | grep -q "refs/tags/${NEW_TAG}$"; then
                   echo "::warning::Tag ${NEW_TAG} was created by another process"
-                  TAG_EXISTS="true"
+                  echo "TAG_EXISTS=true" >> "${GITHUB_ENV}"
                 else
                   echo "::error::Failed to push tag after ${MAX_RETRIES} attempts"
                   exit 1
                 fi
               fi
             done
-            
-            [ "${PUSH_SUCCESS}" = "true" ] && TAG_EXISTS="false"
           fi
-          
-          # ✅ Export TAG_EXISTS to both GITHUB_ENV and GITHUB_OUTPUT
-          echo "TAG_EXISTS=${TAG_EXISTS}" >> "${GITHUB_ENV}"
-          echo "tag_exists=${TAG_EXISTS}" >> "${GITHUB_OUTPUT}"
           
           echo "::endgroup::"
       
@@ -415,7 +418,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts
-  
+
       - name: Organize Artifacts
         run: |
           set -euo pipefail
@@ -425,6 +428,7 @@ jobs:
           
           if [ ! -d "artifacts" ]; then
             echo "::error::artifacts/ directory not found!"
+            echo "Current directory structure:"
             ls -la
             exit 1
           fi
@@ -463,7 +467,10 @@ jobs:
           echo "  Total size: $(numfmt --to=iec-i --suffix=B ${TOTAL_SIZE})"
           
           if [ "${ZIP_COUNT}" -eq 0 ]; then
+            echo ""
             echo "::error::No ZIP files found in artifacts!"
+            echo ""
+            echo "🔍 Artifact directory structure:"
             find artifacts -type f -ls
             exit 1
           fi
@@ -472,7 +479,7 @@ jobs:
           echo "📦 Release files ready:"
           ls -lh release_zips/ | tail -n +2
           echo "::endgroup::"
-  
+
       - name: Generate Release Notes
         run: |
           set -euo pipefail
@@ -521,71 +528,95 @@ jobs:
           ## ✨ Features
           
           ### 🔐 Core Components
-          - ⚡ **SukiSU Ultra Manager** - Enhanced KernelSU manager
-          - 🛡️ **SUSFS v1.5.12** - Kernel-level root hiding
+          - ⚡ **SukiSU Ultra Manager** - Enhanced KernelSU manager with advanced features
+          - 🛡️ **SUSFS v1.5.12** - Kernel-level root hiding (module auto-extracted to `/sdcard/`)
           - 🔐 **Magic Mount** - Seamless file system modifications
-          - 🔧 **Ptrace Fix** - Enhanced debugging support
+          - 🔧 **Ptrace Fix** - Enhanced debugging support for kernels < 5.16
           
           ### 🎯 Hook Types
           - **Manual (VFS)** - Direct VFS hooks (default, most stable)
-          - **Kprobe** - Dynamic kernel probing
-          - **Tracepoint** - Kernel tracepoint hooks
+          - **Kprobe** - Dynamic kernel probing (flexible)
+          - **Tracepoint** - Kernel tracepoint hooks (low overhead)
           
           ### 🌐 Network & Security
-          - 🌐 **WireGuard** - Modern VPN protocol
-          - 🔥 **IP Set** - Advanced firewall management
-          - 📈 **BBR** - TCP congestion control
-          - 🛡️ **BBG LSM** - Optional security module
+          - 🌐 **WireGuard** - Modern, fast VPN protocol
+          - 🔥 **IP Set** - Advanced firewall rule management
+          - 📈 **BBR** - Google's TCP congestion control
+          - 🛡️ **BBG LSM** - Optional security module (when enabled)
           
           ### 🚀 Performance
-          - 💾 **ZRAM** - Memory compression (LZ4, ZSTD, LZO)
-          - ⚙️ **TMPFS_XATTR** - Extended attributes
-          - 🚀 **HMBIRD scx** - Fengchi scheduler (6.6 only)
-          - 🎯 **Compiler Optimization** - O2/O3 flags
-          - 📦 **ccache** - 85-95% cache hit rate
+          - 💾 **ZRAM Algorithms** - Memory compression (LZ4, ZSTD, LZO)
+          - ⚙️ **TMPFS_XATTR** - Extended attributes for Mountify support
+          - 🚀 **HMBIRD scx** - Fengchi scheduler (6.6 kernels only)
+          - 🎯 **Compiler Optimization** - O2/O3 flags for performance
+          - 📦 **ccache** - Accelerated builds (85-95% cache hit rate)
           
-          ## 📦 Installation
+          ## 📦 Installation Guide
           
-          1. Download correct ZIP for your device
-          2. Flash with SukiSU Manager or Kernel Flasher
-          3. Reboot
+          ### Prerequisites
+          - ✅ Unlocked bootloader        
+          - ✅ Backup of current boot image
+          - ✅ Matching device model
           
-          ## ⚠️ Important
+          ### Installation Steps
           
-          - Use SukiSU Ultra Manager (not standard KernelSU)
-          - Backup your data before flashing
-          - Verify device model matches kernel
+          1. **Download** the correct ZIP for your device from assets below        
+          2. **Flash** the kernel ZIP with SukiSU Manager or Kernel Flasher
+          3. **Reboot**
           
+          ### Post-Installation
+          
+          - Open SukiSU Manager to verify installation
+          - Grant root access to apps as needed
+          - Configure SUSFS hiding if required
+          - Check kernel version in Settings → About Phone
+          
+          ## ⚠️ Important Notes
+          
+          - 🔴 **SUSFS module** is included in kernel ZIP          
+          - 🔴 **Use SukiSU Ultra Manager** (not standard KernelSU) for full compatibility
+          - 🔴 **Backup your data** before flashing
+          - 🔴 **Verify device model** matches kernel before flashing     
+                           
           ## 📝 Build Configuration
           
           | Setting | Value |
           |---------|-------|
           | Hook Type | `${{ inputs.hook }}` |
           | BBG LSM | `${{ inputs.lsm }}` |
-          | ZRAM | `${{ inputs.enable_zram }}` |
-          | Fengchi | `${{ inputs.sched }}` |
-          | Optimization | `${{ inputs.optimize_level }}` |
+          | ZRAM Algorithms | `${{ inputs.enable_zram }}` |
+          | Fengchi Scheduler | `${{ inputs.sched }}` |
+          | Optimization Level | `${{ inputs.optimize_level }}` |
           | Clean Build | `${{ inputs.clean_build }}` |
+          
+          ## 🔗 Resources
+          
+          - [📖 SukiSU Documentation](https://github.com/SukiSU-Ultra/SukiSU-Ultra/wiki)
+          - [🛡️ SUSFS Module Source](https://github.com/sidex15/ksu_module_susfs)
+          - [💬 Telegram Support](https://t.me/SukiSU_Ultra)
+          - [🐛 Report Issues](https://github.com/${{ github.repository }}/issues)
           
           ## 📊 Build Statistics
           
-          - **Run:** #${{ github.run_number }}
-          - **By:** @${{ github.actor }}
+          - **Workflow Run:** #${{ github.run_number }}
+          - **Triggered By:** @${{ github.actor }}
           - **Commit:** `${{ github.sha }}`
-          - **Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          - **Build Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
           
           ---
           
           **Built with ❤️ by GitHub Actions**  
           **Powered by ccache for 5x faster builds** 🚀
           NOTES_END
-  
+          
+          echo "✅ Release notes generated ($(wc -l < notes.md) lines)"
+
       - name: Create Release
-        # ✅ Use step output instead of env variable
-        if: steps.tag.outputs.tag_exists != 'true'
+        if: env.TAG_EXISTS != 'true'
         run: |
           set -euo pipefail
           echo "::group::Create GitHub release"
+          echo "Creating release: ${NEW_TAG}"
           
           MAX_RETRIES=3
           for i in $(seq 1 ${MAX_RETRIES}); do
@@ -593,103 +624,240 @@ jobs:
               --repo "${{ github.repository }}" \
               --title "${{ env.RELEASE_NAME }}" \
               --notes-file notes.md \
-              --draft=false \
-              --prerelease=false; then
+              --prerelease; then
               echo "✅ Release created successfully"
               echo "::endgroup::"
               exit 0
             fi
             
-            # ✅ Check if release already exists
-            if gh release view "${NEW_TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-              echo "::warning::Release ${NEW_TAG} already exists"
-              echo "::endgroup::"
-              exit 0
-            fi
-            
             if [ "${i}" -lt "${MAX_RETRIES}" ]; then
-              echo "⚠️ Retry ${i}/${MAX_RETRIES} in 5s..."
+              echo "⚠️ Release creation failed (attempt ${i}/${MAX_RETRIES})"
+              echo "Retrying in 5 seconds..."
               sleep 5
+            else
+              echo "::error::Failed to create release after ${MAX_RETRIES} attempts"
+              echo "::endgroup::"
+              exit 1
             fi
           done
-          
-          echo "::error::Failed after ${MAX_RETRIES} attempts"
-          exit 1
-  
-      - name: Upload Release Assets
-        # ✅ Use step output instead of env variable
-        if: steps.tag.outputs.tag_exists != 'true'
+
+      - name: Validate Release Creation
+        if: env.TAG_EXISTS != 'true'
         run: |
           set -euo pipefail
-          echo "::group::Upload kernel ZIPs"
+          echo "::group::Validate release"
           
-          SUCCESS=0
-          FAIL=0
+          sleep 3
+          
+          if gh release view "${NEW_TAG}" \
+             --repo "${{ github.repository }}" \
+             --json name,tagName,isPrerelease,createdAt,url > release_info.json; then
+            
+            echo "✅ Release ${NEW_TAG} verified"
+            echo ""
+            
+            jq -r '"Name: \(.name)
+            Tag: \(.tagName)
+            Prerelease: \(.isPrerelease)
+            Created: \(.createdAt)
+            URL: \(.url)"' release_info.json
+            
+          else
+            echo "::error::Release ${NEW_TAG} not found!"
+            echo "Checking if release exists with different method..."
+            gh release list --repo "${{ github.repository }}" --limit 5
+            exit 1
+          fi
+          
+          echo "::endgroup::"
+
+      - name: Upload Release Assets
+        if: env.TAG_EXISTS != 'true'
+        run: |
+          set -euo pipefail
+          echo "::group::Upload kernel ZIPs to release"
+          
+          SUCCESS_COUNT=0
+          FAIL_COUNT=0
+          TOTAL_SIZE=0
           
           while IFS= read -r -d '' zip; do
             filename=$(basename "${zip}")
-            echo "📦 Uploading: ${filename}"
+            filesize=$(stat -c%s "${zip}")
+            TOTAL_SIZE=$((TOTAL_SIZE + filesize))
             
+            echo ""
+            echo "📦 Uploading: ${filename} ($(numfmt --to=iec-i --suffix=B ${filesize}))"
+            
+            UPLOADED=false
             for i in {1..3}; do
               if gh release upload "${NEW_TAG}" "${zip}" \
                  --repo "${{ github.repository }}" \
-                 --clobber; then
-                echo "  ✅ Success"
-                ((SUCCESS++))
+                 --clobber 2>&1; then
+                echo "  ✅ Upload successful"
+                UPLOADED=true
                 break
               fi
-              [ "${i}" -lt 3 ] && sleep 5
-            done || ((FAIL++))
+              
+              if [ "${i}" -lt 3 ]; then
+                echo "  ⚠️ Upload failed, retry ${i}/3 in 5s..."
+                sleep 5
+              fi
+            done
+            
+            if [ "${UPLOADED}" = true ]; then
+              ((SUCCESS_COUNT++))
+            else
+              echo "  ❌ Upload failed after 3 attempts"
+              ((FAIL_COUNT++))
+            fi
           done < <(find release_zips -name "*.zip" -type f -print0 | sort -z)
           
-          echo "📊 Upload: ✅ $SUCCESS | ❌ $FAIL"
-          [ "$FAIL" -gt 0 ] && echo "::warning::$FAIL files failed"
-          [ "$SUCCESS" -eq 0 ] && exit 1
+          echo ""
+          echo "📊 Upload Summary:"
+          echo "  ✅ Successful: ${SUCCESS_COUNT}"
+          echo "  ❌ Failed: ${FAIL_COUNT}"
+          echo "  📦 Total size: $(numfmt --to=iec-i --suffix=B ${TOTAL_SIZE})"
+          
+          if [ "${FAIL_COUNT}" -gt 0 ]; then
+            echo "::warning::${FAIL_COUNT} file(s) failed to upload"
+          fi
+          
+          if [ "${SUCCESS_COUNT}" -eq 0 ]; then
+            echo "::error::No files were uploaded successfully!"
+            exit 1
+          fi
           
           echo "::endgroup::"
-  
+
+      - name: Verify Release Assets
+        if: env.TAG_EXISTS != 'true'
+        run: |
+          set -euo pipefail
+          echo "::group::Verify uploaded assets"
+          
+          ASSET_COUNT=$(gh release view "${NEW_TAG}" \
+            --repo "${{ github.repository }}" \
+            --json assets --jq '.assets | length')
+          
+          LOCAL_COUNT=$(find release_zips -name "*.zip" -type f | wc -l)
+          
+          echo "📊 Asset Verification:"
+          echo "  Local ZIPs: ${LOCAL_COUNT}"
+          echo "  Remote assets: ${ASSET_COUNT}"
+          
+          if [ "${ASSET_COUNT}" -eq 0 ]; then
+            echo "::error::No assets found in release!"
+            exit 1
+          fi
+          
+          if [ "${ASSET_COUNT}" -lt "${LOCAL_COUNT}" ]; then
+            echo "::warning::Only ${ASSET_COUNT} of ${LOCAL_COUNT} files uploaded"
+          else
+            echo "✅ All files uploaded successfully"
+          fi
+          
+          echo ""
+          echo "📦 Release assets:"
+          gh release view "${NEW_TAG}" \
+            --repo "${{ github.repository }}" \
+            --json assets \
+            --jq '.assets[] | "  - \(.name) (\(.size | tonumber / 1024 / 1024 | floor)MB)"'
+          
+          echo "::endgroup::"
+
       - name: Release Summary
         if: always()
-        continue-on-error: true 
         run: |
+          set -euo pipefail
+          
           STATUS="${{ job.status }}"
-          [ "$STATUS" = "success" ] && EMOJI="✅" || EMOJI="❌"
+          TAG_STATUS="${{ env.TAG_EXISTS }}"
           
-          cat >> $GITHUB_STEP_SUMMARY << EOF
-          # $EMOJI Release: ${NEW_TAG}
+          if [ "${STATUS}" = "success" ]; then
+            EMOJI="✅"
+            COLOR="🟢"
+          elif [ "${STATUS}" = "failure" ]; then
+            EMOJI="❌"
+            COLOR="🔴"
+          else
+            EMOJI="⚠️"
+            COLOR="🟡"
+          fi
           
-          **Status:** $STATUS  
-          **URL:** https://github.com/${{ github.repository }}/releases/tag/${NEW_TAG}
+          cat >> "${GITHUB_STEP_SUMMARY}" << EOF
+          # ${EMOJI} Release: ${NEW_TAG}
           
-          ## 📦 Assets
+          **Status:** ${COLOR} **${STATUS^^}**  
+          **Tag Existed:** $([ "${TAG_STATUS}" = "true" ] && echo "Yes (skipped)" || echo "No (created)")  
+          **Release URL:** https://github.com/${{ github.repository }}/releases/tag/${NEW_TAG}
+          
+          ---
           
           EOF
           
-          # ✅ Use step output instead of env variable
-          if [ "$STATUS" = "success" ] && [ "${{ steps.tag.outputs.tag_exists }}" != "true" ]; then
-            gh release view "${NEW_TAG}" --json assets \
-              --jq '.assets[] | "- `\(.name)` (\(.size / 1024 / 1024 | floor)MB)"' \
-              >> $GITHUB_STEP_SUMMARY || true
+          if [ "${STATUS}" = "success" ] && [ "${TAG_STATUS}" != "true" ]; then
+            gh release view "${NEW_TAG}" \
+              --repo "${{ github.repository }}" \
+              --json assets,createdAt \
+              --jq '"## 📦 Uploaded Assets (\(.assets | length) files)
+
+          | Filename | Size | Downloads |
+          |----------|------|-----------|" + (.assets | sort_by(.name) | map("| `\(.name)` | \(.size | tonumber / 1024 / 1024 | floor)MB | \(.downloadCount) |") | join("\n"))' \
+              >> "${GITHUB_STEP_SUMMARY}" || echo "_Asset list unavailable_" >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "_Release creation was skipped or failed_" >> "${GITHUB_STEP_SUMMARY}"
           fi
-  
+          
+          cat >> "${GITHUB_STEP_SUMMARY}" << EOF
+          
+          ## 🔗 Quick Links
+          
+          - [📥 Download Release](https://github.com/${{ github.repository }}/releases/tag/${NEW_TAG})
+          - [📋 All Releases](https://github.com/${{ github.repository }}/releases)
+          - [🔧 SUSFS Module](https://github.com/sidex15/ksu_module_susfs)
+          - [📱 SukiSU Manager](https://github.com/SukiSU-Ultra/SukiSU-Ultra)
+          
+          ## 📊 Build Statistics
+          
+          | Metric | Value |
+          |--------|-------|
+          | Total Builds | $(find release_zips -name "*.zip" 2>/dev/null | wc -l) |
+          | Workflow Run | #${{ github.run_number }} |
+          | Triggered By | @${{ github.actor }} |
+          | Commit | \`${GITHUB_SHA:0:7}\` |
+          | Branch | \`${GITHUB_REF#refs/heads/}\` |
+          
+          ## ⚙️ Build Configuration
+          
+          | Setting | Value |
+          |---------|-------|
+          | Hook Type | \`${{ inputs.hook }}\` |
+          | BBG LSM | ${{ inputs.lsm && '✅ Enabled' || '❌ Disabled' }} |
+          | ZRAM | ${{ inputs.enable_zram && '✅ Enabled' || '❌ Disabled' }} |
+          | Fengchi Scheduler | ${{ inputs.sched && '✅ Enabled' || '❌ Disabled' }} |
+          | Optimization | \`${{ inputs.optimize_level }}\` |
+          | Clean Build | ${{ inputs.clean_build && '✅ Yes' || '❌ No' }} |
+          EOF
+
       - name: Cleanup on Failure
-        # ✅ Use step output instead of env variable
-        if: failure() && steps.tag.outputs.tag_exists != 'true'
+        if: failure() && env.TAG_EXISTS != 'true'
         run: |
           set -euo pipefail
           echo "::group::Cleanup failed release"
           
-          # Delete release if it exists
-          if gh release view "${NEW_TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "Deleting release ${NEW_TAG}..."
-            gh release delete "${NEW_TAG}" --yes --cleanup-tag 2>/dev/null || true
+          if gh release view "${NEW_TAG}" \
+             --repo "${{ github.repository }}" > /dev/null 2>&1; then
+            echo "Deleting failed release..."
+            gh release delete "${NEW_TAG}" \
+              --repo "${{ github.repository }}" \
+              --yes || echo "⚠️ Could not delete release"
           fi
           
-          # Delete tag from remote
-          if git ls-remote --tags origin "${NEW_TAG}" | grep -q "refs/tags/${NEW_TAG}$"; then
-            echo "Deleting remote tag ${NEW_TAG}..."
-            git push origin --delete "${NEW_TAG}" 2>/dev/null || true
-          fi
+          echo "Deleting tag from remote..."
+          git push origin --delete "${NEW_TAG}" 2>&1 || echo "⚠️ Could not delete remote tag"
           
-          echo "::warning::Cleanup completed for ${NEW_TAG}"
+          git tag -d "${NEW_TAG}" 2>&1 || echo "⚠️ Could not delete local tag"
+          
+          echo "✅ Cleanup completed"
           echo "::endgroup::"
