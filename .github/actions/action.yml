@@ -1242,82 +1242,115 @@ runs:
         
         echo "::endgroup::"
 
-    - name: Collect Build Stats / Validate Image
-      id: collect_stats
+    - name: ✅ Validate kernel build
       shell: bash
       run: |
         set -euo pipefail
         
-        KERNEL_PATH="$        KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
+        KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
         COMMON="$KERNEL_PATH/common"
         OUT="$COMMON/out"
         IMG="$OUT/arch/arm64/boot/Image"
-        
-        # ✅ Read build time from file (primary method)
         ARTIFACTS_DIR="$GITHUB_WORKSPACE/$CONFIG/artifacts"
         
+        echo "::group::📊 Load Build Metrics"
+        
+        # Load build time
         if [ -f "$ARTIFACTS_DIR/build_time.txt" ]; then
           BUILD_TIME=$(cat "$ARTIFACTS_DIR/build_time.txt")
-          echo "✅ Build time loaded from file: ${BUILD_TIME}s"
+          echo "✅ Build time: ${BUILD_TIME}s"
+        elif [ -f "$ARTIFACTS_DIR/build_start.txt" ] && [ -f "$ARTIFACTS_DIR/build_end.txt" ]; then
+          BUILD_START=$(cat "$ARTIFACTS_DIR/build_start.txt")
+          BUILD_END=$(cat "$ARTIFACTS_DIR/build_end.txt")
+          BUILD_TIME=$((BUILD_END - BUILD_START))
+          echo "✅ Build time (calculated): ${BUILD_TIME}s"
         else
-          # Fallback: try to calculate from start/end files
-          if [ -f "$ARTIFACTS_DIR/build_start.txt" ] && [ -f "$ARTIFACTS_DIR/build_end.txt" ]; then
-            BUILD_START=$(cat "$ARTIFACTS_DIR/build_start.txt")
-            BUILD_END=$(cat "$ARTIFACTS_DIR/build_end.txt")
-            BUILD_TIME=$((BUILD_END - BUILD_START))
-            echo "✅ Build time calculated from timestamps: ${BUILD_TIME}s"
-          else
-            # Last resort: use env var or default to 0
-            BUILD_TIME="${BUILD_TIME:-0}"
-            echo "⚠️ Build time not found, using: ${BUILD_TIME}s"
-          fi
+          BUILD_TIME="0"
+          echo "⚠️ Build time not available"
         fi
         
-        # Read ccache hit rate
+        # Load ccache hit rate
         if [ -f "$ARTIFACTS_DIR/ccache_hit_rate.txt" ]; then
           CCACHE_HIT_RATE=$(cat "$ARTIFACTS_DIR/ccache_hit_rate.txt")
+          echo "✅ ccache hit rate: ${CCACHE_HIT_RATE}%"
         else
-          CCACHE_HIT_RATE="${CCACHE_HIT_RATE:-0}"
+          CCACHE_HIT_RATE="0"
+          echo "⚠️ ccache stats not available"
         fi
         
+        # Count warnings
         if [ -f "$COMMON/build.log" ]; then
-          WARNINGS_COUNT="$(grep -ciE '\bwarning:' "$COMMON/build.log" || true)"
-          [ -n "$WARNINGS_COUNT" ] || WARNINGS_COUNT="0"
+          WARNINGS_COUNT=$(grep -ciE '\bwarning:' "$COMMON/build.log" || echo "0")
+          echo "✅ Warnings: $WARNINGS_COUNT"
         else
           WARNINGS_COUNT="0"
+          echo "⚠️ Build log not found"
         fi
         
+        echo "::endgroup::"
+        
+        echo "::group::🔍 Validate Kernel Image"
+        
+        # Check Image exists
         if [ ! -f "$IMG" ]; then
-          echo "::error::Kernel Image not found at: $IMG"
+          echo "::error::Kernel Image not found: $IMG"
+          ls -la "$OUT/arch/arm64/boot/" || true
           exit 1
         fi
+        echo "✅ Image found: $IMG"
         
-        if ! file "$IMG" | grep -qi 'ARM64'; then
-          echo "::error::Image is not ARM64 format"
-          file "$IMG"
+        # Check Image architecture
+        IMG_TYPE=$(file "$IMG")
+        if ! echo "$IMG_TYPE" | grep -qi 'ARM64'; then
+          echo "::error::Invalid architecture: $IMG_TYPE"
           exit 1
         fi
+        echo "✅ Architecture: ARM64"
         
+        # Check Image size
         IMG_SIZE=$(stat -c %s "$IMG")
-        MIN_SIZE=6102400
+        MIN_SIZE=6102400  # 6MB
         if [ "$IMG_SIZE" -lt "$MIN_SIZE" ]; then
-          echo "::error::Image size too small: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")"
+          echo "::error::Image too small: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")"
           exit 1
         fi
+        IMG_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B "$IMG_SIZE")
+        echo "✅ Size: $IMG_SIZE_HUMAN"
         
+        # Calculate SHA256
         IMG_SHA256=$(sha256sum "$IMG" | awk '{print $1}')
+        echo "✅ SHA256: $IMG_SHA256"
         
-        printf 'warnings_count=%s\n' "$WARNINGS_COUNT" >> "$GITHUB_OUTPUT"
-        printf 'image_sha256=%s\n' "$IMG_SHA256" >> "$GITHUB_OUTPUT"
-        printf 'build_time=%s\n' "$BUILD_TIME" >> "$GITHUB_OUTPUT"
-        printf 'ccache_hit_rate=%s\n' "$CCACHE_HIT_RATE" >> "$GITHUB_OUTPUT"
+        echo "::endgroup::"
         
-        echo "✅ Validation passed:"
-        echo "   - Warnings: $WARNINGS_COUNT"
-        echo "   - Image size: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")"
-        echo "   - SHA256: $IMG_SHA256"
-        echo "   - Build time: ${BUILD_TIME}s ($((BUILD_TIME / 60))m $((BUILD_TIME % 60))s)"
-        echo "   - ccache hit rate: ${CCACHE_HIT_RATE}%"
+        # Write outputs
+        {
+          printf 'warnings_count=%s\n' "$WARNINGS_COUNT"
+          printf 'image_sha256=%s\n' "$IMG_SHA256"
+          printf 'build_time=%s\n' "$BUILD_TIME"
+          printf 'ccache_hit_rate=%s\n' "$CCACHE_HIT_RATE"
+        } >> "$GITHUB_OUTPUT"
+        
+        # Summary
+        echo "::group::📋 Validation Summary"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "✅ All checks passed"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "Warnings:      $WARNINGS_COUNT"
+        echo "Image Size:    $IMG_SIZE_HUMAN"
+        echo "SHA256:        $IMG_SHA256"
+        
+        if [ "$BUILD_TIME" -gt 0 ]; then
+          BUILD_MIN=$((BUILD_TIME / 60))
+          BUILD_SEC=$((BUILD_TIME % 60))
+          printf "Build Time:    %ss (%sm %ss)\n" "$BUILD_TIME" "$BUILD_MIN" "$BUILD_SEC"
+        else
+          echo "Build Time:    N/A"
+        fi
+        
+        echo "ccache Hit:    ${CCACHE_HIT_RATE}%"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "::endgroup::"
 
     - name: Download and Package ZRAM Module
       if: ${{ inputs.enable_zram == 'true' }}
