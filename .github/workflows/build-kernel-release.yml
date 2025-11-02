@@ -190,7 +190,16 @@ jobs:
             echo "  - Kernel: ${{ steps.build.outputs.kernel_version }}"
             echo "  - SukiSU: v${{ steps.build.outputs.sukisu_version }}"
             echo "  - SUSFS: ${{ steps.build.outputs.susfs_version }}"
-            echo "  - Build time: ${{ steps.build.outputs.build_time }}s"
+            
+            BUILD_TIME="${{ steps.build.outputs.build_time }}"
+            if [ -n "$BUILD_TIME" ] && [ "$BUILD_TIME" != "0" ]; then
+              BUILD_MIN=$((BUILD_TIME / 60))
+              BUILD_SEC=$((BUILD_TIME % 60))
+              echo "  - Build time: ${BUILD_TIME}s (${BUILD_MIN}m ${BUILD_SEC}s)"
+            else
+              echo "  - Build time: Not available"
+            fi
+            
             echo "  - ZIP: ${{ steps.build.outputs.zip_name }}"
             echo "  - Size: $(numfmt --to=iec-i --suffix=B ${{ steps.build.outputs.zip_size }} 2>/dev/null || echo '${{ steps.build.outputs.zip_size }} bytes')"
             
@@ -225,13 +234,22 @@ jobs:
           EOF
           
           if [ "${{ steps.build.outcome }}" = "success" ]; then
+            BUILD_TIME="${{ steps.build.outputs.build_time }}"
+            if [ -n "$BUILD_TIME" ] && [ "$BUILD_TIME" != "0" ]; then
+              BUILD_MIN=$((BUILD_TIME / 60))
+              BUILD_SEC=$((BUILD_TIME % 60))
+              BUILD_TIME_DISPLAY="${BUILD_TIME}s (${BUILD_MIN}m ${BUILD_SEC}s)"
+            else
+              BUILD_TIME_DISPLAY="N/A"
+            fi
+            
             cat >> $GITHUB_STEP_SUMMARY << EOF
           | Metric | Value |
           |--------|-------|
           | **Kernel** | ${{ steps.build.outputs.kernel_version }} |
           | **SukiSU** | v${{ steps.build.outputs.sukisu_version }} |
           | **SUSFS** | ${{ steps.build.outputs.susfs_version }} |
-          | **Build Time** | ${{ steps.build.outputs.build_time }}s |
+          | **Build Time** | ${BUILD_TIME_DISPLAY} |
           | **ZIP Size** | $(numfmt --to=iec-i --suffix=B ${{ steps.build.outputs.zip_size }} 2>/dev/null || echo '${{ steps.build.outputs.zip_size }} bytes') |
           EOF
             
