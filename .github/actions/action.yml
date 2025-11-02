@@ -1924,7 +1924,7 @@ runs:
           echo "- **Build Time:** ${BUILD_MIN}m ${BUILD_SEC}s" >> $GITHUB_STEP_SUMMARY
         fi
         
-        # ✅ ccache Hit Rate line removed - no longer displayed
+        # ✅ REMOVED: Duplicate ccache stats section
         
         if [ -n "${{ steps.collect_stats.outputs.warnings_count }}" ]; then
           echo "- **Warnings:** ${{ steps.collect_stats.outputs.warnings_count }}" >> $GITHUB_STEP_SUMMARY
@@ -1952,7 +1952,6 @@ runs:
         
         echo "---" >> $GITHUB_STEP_SUMMARY
         echo "*Built with ❤️ using GitHub Actions*" >> $GITHUB_STEP_SUMMARY
-        echo "*Powered by ccache for faster builds* 🚀" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Build Configuration:**" >> $GITHUB_STEP_SUMMARY
         echo "- Branch: ${OP_BRANCH}" >> $GITHUB_STEP_SUMMARY
