@@ -157,12 +157,23 @@ runs:
     - name: Create and Enable Swap
       shell: bash
       run: |
+        set -euo pipefail
+        echo "::group::Configure swap"
+        
+        # Disable existing swap
         sudo swapoff -a || true
-        sudo fallocate -l 3G /swapfile
+        
+        # Create 2GB swap (reduced from 3GB to save space)
+        sudo fallocate -l 2G /swapfile
         sudo chmod 600 /swapfile
         sudo mkswap /swapfile
         sudo swapon /swapfile
+        
+        # Verify
+        echo "Swap configuration:"
         free -h
+        
+        echo "::endgroup::"
 
     - name: Initialize and Sync Kernel Source
       shell: bash
@@ -373,7 +384,7 @@ runs:
         echo "::group::Configure ccache for maximum performance"
         
         export CCACHE_DIR="/home/runner/.ccache"
-        export CCACHE_MAXSIZE="30G"
+        export CCACHE_MAXSIZE="12G"
         
         # ✅ Persist max size to ccache config
         ccache -M "$CCACHE_MAXSIZE"
@@ -414,7 +425,7 @@ runs:
         echo "✅ ccache configured for production"
         echo ""
         echo "Configuration applied:"
-        echo "  Max size: $CCACHE_MAXSIZE (persisted)"
+        echo "  Max size: 12G (persisted)"
         echo "  Compression: zstd level 3 (default)"
         echo "  Direct mode: enabled"
         echo "  File cloning: enabled"
@@ -1084,6 +1095,35 @@ runs:
         echo "CUSTOM_LOCALVERSION=$CUSTOM_LOCALVERSION" >> "$GITHUB_ENV"
         echo "Kernel branding: $CUSTOM_LOCALVERSION"
 
+    - name: Minimal Disk Cleanup
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Essential cleanup only"
+        
+        echo "📊 Before cleanup:"
+        df -h
+        echo ""
+        
+        echo "🗑️ Removing large non-essential packages..."
+        # Remove big non-essential bundles (safe on GH-hosted runners)
+        sudo rm -rf /usr/share/dotnet || true
+        sudo rm -rf /usr/local/lib/android || true
+        sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+        
+        # Clear Docker images if Docker is available
+        if command -v docker >/dev/null 2>&1; then
+          echo "🐳 Cleaning Docker..."
+          docker system prune -af --volumes 2>/dev/null || true
+        fi
+        
+        echo ""
+        echo "📊 After cleanup:"
+        df -h
+        echo ""
+        echo "✅ Cleanup complete"
+        echo "::endgroup::"
+
     - name: Build Kernel
       shell: bash
       env:
@@ -1265,6 +1305,17 @@ runs:
           ccache -s
         fi
         echo "============================================"
+        echo "::endgroup::"
+
+    - name: Check Disk Space (Post-Build)
+      if: always()
+      shell: bash
+      run: |
+        echo "::group::Disk space report"
+        df -h
+        echo ""
+        echo "Largest directories in workspace:"
+        du -h --max-depth=2 "$GITHUB_WORKSPACE" 2>/dev/null | sort -rh | head -n 20 || true
         echo "::endgroup::"
 
     - name: On failure - Summarize last error
