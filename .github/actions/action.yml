@@ -134,38 +134,6 @@ runs:
         echo "✅ Dependencies installed"
         echo "::endgroup::"
 
-    - name: 💾 Setup ccache
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::group::Setup ccache"
-        
-        # Configure ccache
-        ccache --set-config=max_size=5G
-        ccache --set-config=compression=true
-        ccache --set-config=compression_level=6
-        ccache --set-config=cache_dir=$HOME/.ccache
-        ccache --set-config=sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime
-        ccache --set-config=hash_dir=false
-        
-        # Show ccache info
-        echo "ccache version: $(ccache --version | head -n1)"
-        echo ""
-        echo "ccache configuration:"
-        ccache --show-config | grep -E "max_size|compression|cache_dir"
-        
-        echo "✅ ccache configured"
-        echo "::endgroup::"
-
-    - name: 💾 Restore ccache
-      uses: actions/cache@v4
-      with:
-        path: ~/.ccache
-        key: ccache-${{ env.OP_MODEL }}-${{ github.sha }}
-        restore-keys: |
-          ccache-${{ env.OP_MODEL }}-
-          ccache-
-
     - name: Setup Base Environment
       shell: bash
       run: |
@@ -195,9 +163,6 @@ runs:
         echo "CPU:"
         echo "  Cores: $(nproc --all)"
         echo "  Model: $(lscpu | grep 'Model name' | cut -d: -f2 | xargs)"
-        echo ""
-        echo "ccache:"
-        ccache --show-stats || echo "  No cache yet"
         echo "::endgroup::"
 
     - name: Initialize and Sync Kernel Source
@@ -337,6 +302,72 @@ runs:
         echo "✅ Clang toolchain validated"
         echo "   Path: ${CLANG_BIN_PATH}"
         echo "   Version: ${CLANG_VERSION}"
+        echo "::endgroup::"
+
+    # ✅ FIX #1: Improved ccache Strategy
+    - name: 💾 Setup ccache
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Setup ccache"
+        
+        # Configure ccache with optimized settings
+        ccache --set-config=max_size=5G
+        ccache --set-config=compression=true
+        ccache --set-config=compression_level=6
+        ccache --set-config=cache_dir=$HOME/.ccache
+        ccache --set-config=sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime
+        ccache --set-config=hash_dir=false
+        ccache --set-config=depend_mode=true
+        ccache --set-config=direct_mode=true
+        
+        # Show ccache info
+        echo "ccache version: $(ccache --version | head -n1)"
+        echo ""
+        echo "ccache configuration:"
+        ccache --show-config | grep -E "max_size|compression|cache_dir|sloppiness"
+        
+        echo "✅ ccache configured"
+        echo "::endgroup::"
+
+    # ✅ FIX #2: Smart Cache Restore with Better Keys
+    - name: 💾 Restore ccache
+      uses: actions/cache/restore@v4
+      id: cache_restore
+      with:
+        path: ~/.ccache
+        key: ccache-${{ env.OP_MODEL }}-${{ env.KERNEL_VER }}-${{ github.sha }}
+        restore-keys: |
+          ccache-${{ env.OP_MODEL }}-${{ env.KERNEL_VER }}-
+          ccache-${{ env.OP_MODEL }}-
+          ccache-
+        lookup-only: false
+
+    - name: 📊 Check Cache Status
+      shell: bash
+      run: |
+        echo "::group::Cache Status"
+        
+        if [ "${{ steps.cache_restore.outputs.cache-hit }}" == "true" ]; then
+          echo "✅ Exact cache hit!"
+          CACHE_TYPE="exact"
+        elif [ -n "${{ steps.cache_restore.outputs.cache-matched-key }}" ]; then
+          echo "✅ Partial cache hit: ${{ steps.cache_restore.outputs.cache-matched-key }}"
+          CACHE_TYPE="partial"
+        else
+          echo "ℹ️ No cache found, starting fresh"
+          CACHE_TYPE="none"
+        fi
+        
+        echo "CACHE_TYPE=$CACHE_TYPE" >> "$GITHUB_ENV"
+        
+        # Show current ccache stats
+        if [ -d "$HOME/.ccache" ]; then
+          echo ""
+          echo "Current ccache statistics:"
+          ccache --show-stats --verbose || ccache --show-stats
+        fi
+        
         echo "::endgroup::"
 
     - name: Clone AnyKernel3
@@ -976,24 +1007,42 @@ runs:
         mkdir -p out
         CUSTOM_LOCALVERSION="-${{ env.ANDROID_VER }}-OP-UltraBolt"
         echo "CUSTOM_LOCALVERSION=$CUSTOM_LOCALVERSION" >> "$GITHUB_ENV"
-        echo "Kernel branding: $CUSTOM_LOCALVERSION"  
-        
-    - name: Build Kernel
+        echo "Kernel branding: $CUSTOM_LOCALVERSION"
+
+    # ✅ FIX #3: Robust Build Time Tracking
+    - name: 📊 Initialize Build Metrics
       shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Initialize build metrics"
+        
+        ARTIFACTS_DIR="$GITHUB_WORKSPACE/$CONFIG/artifacts"
+        mkdir -p "$ARTIFACTS_DIR"
+        
+        # Write start time IMMEDIATELY
+        BUILD_START=$(date +%s)
+        echo "$BUILD_START" > "$ARTIFACTS_DIR/build_start.txt"
+        echo "BUILD_START=$BUILD_START" >> "$GITHUB_ENV"
+        
+        echo "✅ Build metrics initialized"
+        echo "   Start time: $BUILD_START ($(date -u -d @${BUILD_START} '+%Y-%m-%d %H:%M:%S UTC'))"
+        echo "::endgroup::"
+        
+    # ✅ FIX #4: Build with Retry Logic
+    - name: Build Kernel
+      id: build_kernel
+      shell: bash
+      continue-on-error: true
       env:
         PYTHONWARNINGS: "ignore:invalid escape sequence"
       run: |
         set -euo pipefail
-        echo "::group::Build kernel"
+        echo "::group::Build kernel (Attempt 1)"
         
         KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
         COMMON="$KERNEL_PATH/common"
         cd "$COMMON"
         : > "$COMMON/.scmversion"
-        
-        # ✅ Create artifacts directory early
-        ARTIFACTS_DIR="$GITHUB_WORKSPACE/$CONFIG/artifacts"
-        mkdir -p "$ARTIFACTS_DIR"
         
         export PYTHONWARNINGS="${PYTHONWARNINGS}"
         
@@ -1092,68 +1141,198 @@ runs:
         echo "Workspace: $WORKSPACE"
         echo "============================================"
         
-        # ✅ Record start time and save to file
-        BUILD_START=$(date +%s)
-        echo "$BUILD_START" > "$ARTIFACTS_DIR/build_start.txt"
-        
-        echo "BUILD_START=$BUILD_START" >> "$GITHUB_ENV"
-        
         # BUILD with timing
         set -o pipefail
         
-        make -j"$(nproc --all)" \
+        if make -j"$(nproc --all)" \
           O="$OUT" \
           KCFLAGS="$KCFLAGS" \
           KCPPFLAGS="$KCPPFLAGS" \
-          2>&1 | tee build.log
+          2>&1 | tee build.log; then
+          
+          echo "BUILD_SUCCESS=true" >> "$GITHUB_ENV"
+          echo "::endgroup::"
+        else
+          echo "BUILD_SUCCESS=false" >> "$GITHUB_ENV"
+          echo "::warning::Build attempt 1 failed"
+          echo "::endgroup::"
+          exit 1
+        fi
+
+    - name: 🔄 Retry Build on Failure
+      if: steps.build_kernel.outcome == 'failure'
+      shell: bash
+      env:
+        PYTHONWARNINGS: "ignore:invalid escape sequence"
+      run: |
+        set -euo pipefail
+        echo "::group::Build kernel (Attempt 2 - Retry)"
+        echo "::warning::First build attempt failed, retrying with optimizations..."
         
-        # ✅ Record end time and calculate duration
-        BUILD_END=$(date +%s)
-        BUILD_TIME=$((BUILD_END - BUILD_START))
+        KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
+        COMMON="$KERNEL_PATH/common"
+        cd "$COMMON"
         
-        # ✅ Save all timing data to files
-        echo "$BUILD_END" > "$ARTIFACTS_DIR/build_end.txt"
-        echo "$BUILD_TIME" > "$ARTIFACTS_DIR/build_time.txt"
+        # Show last error
+        echo "Last 50 lines of previous build:"
+        tail -n 50 build.log || echo "Build log not available"
+        echo ""
         
-        # Also set env vars (backup)
-        echo "BUILD_START=$BUILD_START" >> "$GITHUB_ENV"
-        echo "BUILD_END=$BUILD_END" >> "$GITHUB_ENV"
-        echo "BUILD_TIME=$BUILD_TIME" >> "$GITHUB_ENV"
+        # Clear problematic cache entries
+        echo "Clearing ccache..."
+        ccache --clear
+        ccache --zero-stats
         
-        # Show ccache stats after build
+        # Retry with same settings
+        export PYTHONWARNINGS="${PYTHONWARNINGS}"
+        export SOURCE_DATE_EPOCH=1609459200
+        export KBUILD_BUILD_TIMESTAMP="$(date -u -d @${SOURCE_DATE_EPOCH} '+%Y-%m-%d %H:%M:%S UTC')"
+        export KBUILD_BUILD_USER="builder"
+        export KBUILD_BUILD_HOST="github-actions"
+        export KBUILD_BUILD_VERSION=1
+        
+        export USE_CCACHE=1
+        export CCACHE_DIR=$HOME/.ccache
+        export PATH="/usr/lib/ccache:${CLANG_BIN_PATH}:${PATH}"
+        
+        WORKSPACE="${GITHUB_WORKSPACE}"
+        MAP="-fdebug-prefix-map=${WORKSPACE}=."
+        MPMAP="-fmacro-prefix-map=${WORKSPACE}=."
+        FPMAP="-ffile-prefix-map=${WORKSPACE}=."
+        
+        export KCFLAGS="${KCFLAGS:-} $MAP $MPMAP $FPMAP -no-canonical-prefixes -fdiagnostics-color=never -Qunused-arguments -Wno-unused-command-line-argument"
+        export KCPPFLAGS="${KCPPFLAGS:-} $MAP $MPMAP $FPMAP"
+        
+        export CC="ccache clang"
+        export CXX="ccache clang++"
+        export HOSTCC="ccache clang"
+        export HOSTCXX="ccache clang++"
+        
+        export LLVM=1 LLVM_IAS=1
+        export ARCH=arm64 SUBARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-android-
+        export CROSS_COMPILE_COMPAT=arm-linux-androideabi-
+        export LD=ld.lld HOSTLD=ld.lld AR=llvm-ar NM=llvm-nm 
+        export OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip
+        
+        OUT=out
+        
+        if [ "${{ inputs.optimize_level }}" = "O3" ]; then
+          KCFLAGS_EXTRA="-O3"
+        else
+          KCFLAGS_EXTRA="-O2"
+        fi
+        
+        KCFLAGS="$KCFLAGS -Wno-error -pipe -fno-stack-protector ${KCFLAGS_EXTRA}"
+        KCPPFLAGS="$KCPPFLAGS -DCONFIG_OPTIMIZE_INLINING"
+        
+        echo "Retrying build..."
+        set -o pipefail
+        
+        if make -j"$(nproc --all)" \
+          O="$OUT" \
+          KCFLAGS="$KCFLAGS" \
+          KCPPFLAGS="$KCPPFLAGS" \
+          2>&1 | tee build_retry.log; then
+          
+          echo "BUILD_SUCCESS=true" >> "$GITHUB_ENV"
+          echo "::notice::✅ Build succeeded on retry!"
+          echo "::endgroup::"
+        else
+          echo "BUILD_SUCCESS=false" >> "$GITHUB_ENV"
+          echo "::error::❌ Build failed after retry"
+          echo "::endgroup::"
+          
+          echo "::group::Build failure details"
+          echo "Last 100 lines of retry build:"
+          tail -n 100 build_retry.log || echo "Retry log not available"
+          echo "::endgroup::"
+          
+          exit 1
+        fi
+
+    - name: 📊 Calculate Build Time
+      if: always()
+      id: collect_stats
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Calculate build metrics"
+        
+        ARTIFACTS_DIR="$GITHUB_WORKSPACE/$CONFIG/artifacts"
+        COMMON="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
+        
+        # Calculate build time
+        if [ -f "$ARTIFACTS_DIR/build_start.txt" ]; then
+          BUILD_START=$(cat "$ARTIFACTS_DIR/build_start.txt")
+          BUILD_END=$(date +%s)
+          BUILD_TIME=$((BUILD_END - BUILD_START))
+          
+          echo "$BUILD_END" > "$ARTIFACTS_DIR/build_end.txt"
+          echo "$BUILD_TIME" > "$ARTIFACTS_DIR/build_time.txt"
+          
+          BUILD_MIN=$((BUILD_TIME / 60))
+          BUILD_SEC=$((BUILD_TIME % 60))
+          
+          echo "build_time=$BUILD_TIME" >> "$GITHUB_OUTPUT"
+          echo "BUILD_TIME=$BUILD_TIME" >> "$GITHUB_ENV"
+          
+          echo "✅ Build time: ${BUILD_TIME}s (${BUILD_MIN}m ${BUILD_SEC}s)"
+        else
+          echo "⚠️ Build start time not found"
+          echo "build_time=0" >> "$GITHUB_OUTPUT"
+          BUILD_TIME=0
+        fi
+        
+        # Collect ccache statistics
+        echo ""
         echo "============================================"
         echo "📊 ccache Statistics (After Build)"
         echo "============================================"
         ccache --show-stats | tee "$ARTIFACTS_DIR/ccache_stats.txt"
-        
-        # Extract hit rate
-        CCACHE_HIT_RATE=$(ccache --show-stats | grep -oP 'cache hit rate.*?(\d+\.\d+)%' | grep -oP '\d+\.\d+' || echo "0")
-        echo "CCACHE_HIT_RATE=$CCACHE_HIT_RATE" >> "$GITHUB_ENV"
-        echo "$CCACHE_HIT_RATE" > "$ARTIFACTS_DIR/ccache_hit_rate.txt"
-        
         echo "============================================"
         
-        # Verify output
-        IMG="$OUT/arch/arm64/boot/Image"
-        if [ ! -f "$IMG" ]; then
-          echo "::error::Kernel Image missing"
-          echo "::group::Last 100 lines of build log"
-          tail -n 100 build.log || echo "Build log not available"
-          echo "::endgroup::"
-          exit 1
+        # Extract ccache hit rate
+        CCACHE_HIT_RATE=$(ccache --show-stats | grep -oP 'cache hit rate.*?(\d+\.\d+)%' | grep -oP '\d+\.\d+' || echo "0")
+        if [ -z "$CCACHE_HIT_RATE" ]; then
+          # Try alternative format
+          CCACHE_HIT_RATE=$(ccache --show-stats | grep -oP 'Hits:.*?(\d+\.\d+)%' | grep -oP '\d+\.\d+' || echo "0")
         fi
         
-        IMG_SIZE=$(stat -c%s "$IMG")
+        echo "$CCACHE_HIT_RATE" > "$ARTIFACTS_DIR/ccache_hit_rate.txt"
+        echo "ccache_hit_rate=$CCACHE_HIT_RATE" >> "$GITHUB_OUTPUT"
+        echo "CCACHE_HIT_RATE=$CCACHE_HIT_RATE" >> "$GITHUB_ENV"
         
-        echo "============================================"
-        echo "✅ Build Completed Successfully"
-        echo "============================================"
-        echo "Duration: $((BUILD_TIME / 60))m $((BUILD_TIME % 60))s"
-        echo "Image: $(numfmt --to=iec-i --suffix=B "$IMG_SIZE")"
-        echo "ccache hit rate: ${CCACHE_HIT_RATE}%"
-        echo "============================================"
+        echo "✅ ccache hit rate: ${CCACHE_HIT_RATE}%"
+        
+        # Count warnings
+        WARNINGS_COUNT=0
+        if [ -f "$COMMON/build.log" ]; then
+          WARNINGS_COUNT=$(grep -ciE '\bwarning:' "$COMMON/build.log" || echo "0")
+        elif [ -f "$COMMON/build_retry.log" ]; then
+          WARNINGS_COUNT=$(grep -ciE '\bwarning:' "$COMMON/build_retry.log" || echo "0")
+        fi
+        
+        echo "$WARNINGS_COUNT" > "$ARTIFACTS_DIR/warnings_count.txt"
+        echo "warnings_count=$WARNINGS_COUNT" >> "$GITHUB_OUTPUT"
+        echo "WARNINGS_COUNT=$WARNINGS_COUNT" >> "$GITHUB_ENV"
+        
+        echo "✅ Warnings: $WARNINGS_COUNT"
+        
+        # Calculate kernel image SHA256
+        IMG="$COMMON/out/arch/arm64/boot/Image"
+        if [ -f "$IMG" ]; then
+          IMG_SHA256=$(sha256sum "$IMG" | awk '{print $1}')
+          echo "$IMG_SHA256" > "$ARTIFACTS_DIR/image_sha256.txt"
+          echo "image_sha256=$IMG_SHA256" >> "$GITHUB_OUTPUT"
+          echo "✅ Image SHA256: $IMG_SHA256"
+        else
+          echo "⚠️ Kernel Image not found"
+          echo "image_sha256=" >> "$GITHUB_OUTPUT"
+        fi
+        
         echo "::endgroup::"
-   
+
     - name: On failure - Summarize last error
       if: ${{ failure() }}
       shell: bash
@@ -1166,7 +1345,9 @@ runs:
         echo "" >> "$GITHUB_STEP_SUMMARY"
         echo '```' >> "$GITHUB_STEP_SUMMARY"
         
-        if [ -f "$COMMON/build.log" ]; then
+        if [ -f "$COMMON/build_retry.log" ]; then
+          tail -n 120 "$COMMON/build_retry.log" >> "$GITHUB_STEP_SUMMARY"
+        elif [ -f "$COMMON/build.log" ]; then
           tail -n 120 "$COMMON/build.log" >> "$GITHUB_STEP_SUMMARY"
         else
           echo "build.log not available" >> "$GITHUB_STEP_SUMMARY"
@@ -1179,6 +1360,63 @@ runs:
         echo '```' >> "$GITHUB_STEP_SUMMARY"
         ccache --show-stats >> "$GITHUB_STEP_SUMMARY" || echo "ccache stats unavailable" >> "$GITHUB_STEP_SUMMARY"
         echo '```' >> "$GITHUB_STEP_SUMMARY"
+        
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "### System Resources at Failure" >> "$GITHUB_STEP_SUMMARY"
+        echo '```' >> "$GITHUB_STEP_SUMMARY"
+        echo "Disk:" >> "$GITHUB_STEP_SUMMARY"
+        df -h / >> "$GITHUB_STEP_SUMMARY"
+        echo "" >> "$GITHUB_STEP_SUMMARY"
+        echo "Memory:" >> "$GITHUB_STEP_SUMMARY"
+        free -h >> "$GITHUB_STEP_SUMMARY"
+        echo '```' >> "$GITHUB_STEP_SUMMARY"
+        
+        echo "::endgroup::"
+
+    # ✅ FIX #2: Save ccache (Always run, even on failure)
+    - name: 💾 Save ccache
+      if: always()
+      uses: actions/cache/save@v4
+      with:
+        path: ~/.ccache
+        key: ccache-${{ env.OP_MODEL }}-${{ env.KERNEL_VER }}-${{ github.sha }}
+
+    - name: 📊 ccache Final Report
+      if: always()
+      shell: bash
+      run: |
+        echo "::group::ccache Final Report"
+        
+        echo "============================================"
+        echo "📊 Final ccache Statistics"
+        echo "============================================"
+        ccache --show-stats
+        echo "============================================"
+        
+        # Show cache size
+        if [ -d "$HOME/.ccache" ]; then
+          CACHE_SIZE=$(du -sh "$HOME/.ccache" | cut -f1)
+          echo ""
+          echo "Cache directory size: $CACHE_SIZE"
+        fi
+        
+        # Compare with initial stats
+        ARTIFACTS_DIR="$GITHUB_WORKSPACE/$CONFIG/artifacts"
+        if [ -f "$ARTIFACTS_DIR/ccache_hit_rate.txt" ]; then
+          HIT_RATE=$(cat "$ARTIFACTS_DIR/ccache_hit_rate.txt")
+          
+          if (( $(echo "$HIT_RATE > 50" | bc -l) )); then
+            echo ""
+            echo "✅ Excellent cache performance: ${HIT_RATE}%"
+          elif (( $(echo "$HIT_RATE > 25" | bc -l) )); then
+            echo ""
+            echo "✅ Good cache performance: ${HIT_RATE}%"
+          else
+            echo ""
+            echo "ℹ️ Cache warming up: ${HIT_RATE}%"
+            echo "   (Expected to improve on subsequent builds)"
+          fi
+        fi
         
         echo "::endgroup::"
 
@@ -1253,42 +1491,6 @@ runs:
         IMG="$OUT/arch/arm64/boot/Image"
         ARTIFACTS_DIR="$GITHUB_WORKSPACE/$CONFIG/artifacts"
         
-        echo "::group::📊 Load Build Metrics"
-        
-        # Load build time
-        if [ -f "$ARTIFACTS_DIR/build_time.txt" ]; then
-          BUILD_TIME=$(cat "$ARTIFACTS_DIR/build_time.txt")
-          echo "✅ Build time: ${BUILD_TIME}s"
-        elif [ -f "$ARTIFACTS_DIR/build_start.txt" ] && [ -f "$ARTIFACTS_DIR/build_end.txt" ]; then
-          BUILD_START=$(cat "$ARTIFACTS_DIR/build_start.txt")
-          BUILD_END=$(cat "$ARTIFACTS_DIR/build_end.txt")
-          BUILD_TIME=$((BUILD_END - BUILD_START))
-          echo "✅ Build time (calculated): ${BUILD_TIME}s"
-        else
-          BUILD_TIME="0"
-          echo "⚠️ Build time not available"
-        fi
-        
-        # Load ccache hit rate
-        if [ -f "$ARTIFACTS_DIR/ccache_hit_rate.txt" ]; then
-          CCACHE_HIT_RATE=$(cat "$ARTIFACTS_DIR/ccache_hit_rate.txt")
-          echo "✅ ccache hit rate: ${CCACHE_HIT_RATE}%"
-        else
-          CCACHE_HIT_RATE="0"
-          echo "⚠️ ccache stats not available"
-        fi
-        
-        # Count warnings
-        if [ -f "$COMMON/build.log" ]; then
-          WARNINGS_COUNT=$(grep -ciE '\bwarning:' "$COMMON/build.log" || echo "0")
-          echo "✅ Warnings: $WARNINGS_COUNT"
-        else
-          WARNINGS_COUNT="0"
-          echo "⚠️ Build log not found"
-        fi
-        
-        echo "::endgroup::"
-        
         echo "::group::🔍 Validate Kernel Image"
         
         # Check Image exists
@@ -1317,38 +1519,40 @@ runs:
         IMG_SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B "$IMG_SIZE")
         echo "✅ Size: $IMG_SIZE_HUMAN"
         
-        # Calculate SHA256
-        IMG_SHA256=$(sha256sum "$IMG" | awk '{print $1}')
-        echo "✅ SHA256: $IMG_SHA256"
-        
         echo "::endgroup::"
-        
-        # Write outputs
-        {
-          printf 'warnings_count=%s\n' "$WARNINGS_COUNT"
-          printf 'image_sha256=%s\n' "$IMG_SHA256"
-          printf 'build_time=%s\n' "$BUILD_TIME"
-          printf 'ccache_hit_rate=%s\n' "$CCACHE_HIT_RATE"
-        } >> "$GITHUB_OUTPUT"
         
         # Summary
         echo "::group::📋 Validation Summary"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "✅ All checks passed"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo "Warnings:      $WARNINGS_COUNT"
-        echo "Image Size:    $IMG_SIZE_HUMAN"
-        echo "SHA256:        $IMG_SHA256"
         
-        if [ "$BUILD_TIME" -gt 0 ]; then
-          BUILD_MIN=$((BUILD_TIME / 60))
-          BUILD_SEC=$((BUILD_TIME % 60))
-          printf "Build Time:    %ss (%sm %ss)\n" "$BUILD_TIME" "$BUILD_MIN" "$BUILD_SEC"
-        else
-          echo "Build Time:    N/A"
+        if [ -f "$ARTIFACTS_DIR/warnings_count.txt" ]; then
+          WARNINGS=$(cat "$ARTIFACTS_DIR/warnings_count.txt")
+          echo "Warnings:      $WARNINGS"
         fi
         
-        echo "ccache Hit:    ${CCACHE_HIT_RATE}%"
+        echo "Image Size:    $IMG_SIZE_HUMAN"
+        
+        if [ -f "$ARTIFACTS_DIR/image_sha256.txt" ]; then
+          SHA256=$(cat "$ARTIFACTS_DIR/image_sha256.txt")
+          echo "SHA256:        $SHA256"
+        fi
+        
+        if [ -f "$ARTIFACTS_DIR/build_time.txt" ]; then
+          BUILD_TIME=$(cat "$ARTIFACTS_DIR/build_time.txt")
+          if [ "$BUILD_TIME" -gt 0 ]; then
+            BUILD_MIN=$((BUILD_TIME / 60))
+            BUILD_SEC=$((BUILD_TIME % 60))
+            printf "Build Time:    %ss (%sm %ss)\n" "$BUILD_TIME" "$BUILD_MIN" "$BUILD_SEC"
+          fi
+        fi
+        
+        if [ -f "$ARTIFACTS_DIR/ccache_hit_rate.txt" ]; then
+          HIT_RATE=$(cat "$ARTIFACTS_DIR/ccache_hit_rate.txt")
+          echo "ccache Hit:    ${HIT_RATE}%"
+        fi
+        
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "::endgroup::"
 
