@@ -354,51 +354,48 @@ runs:
         
         CACHE_DIR="$HOME/.ccache"
         echo "CCACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
-        echo "CCACHE_MAXSIZE=30G" >> "$GITHUB_ENV"
+        echo "CCACHE_MAXSIZE=12G" >> "$GITHUB_ENV"
         
         mkdir -p "$CACHE_DIR"
         
         echo "Cache configuration:"
         echo "  Directory: $CACHE_DIR"
-        echo "  Max size: 30G"
+        echo "  Max size: 12G"
         echo "  Android: ${ANDROID_VER:-unknown}"
         echo "  Kernel: ${KERNEL_VER:-unknown}"
         echo "  Clang: ${CLANG_VERSION_SHORT:-unknown}"
         echo "  Device: ${OP_MODEL:-unknown}"
         echo "::endgroup::"
-
-    - name: Restore ccache
-      if: ${{ inputs.clean != 'true' }}
+    
+    - name: Cache ccache
       uses: actions/cache@v4
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-v2-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}
+        key: ccache-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}
         restore-keys: |
-          ccache-v2-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-
-          ccache-v2-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-
-          ccache-v2-${{ env.ANDROID_VER }}-${{ env.CLANG_VERSION_SHORT }}-
-          ccache-v2-${{ env.ANDROID_VER }}-
-          ccache-v2-${{ env.CLANG_VERSION_SHORT }}-
-          ccache-v2-
-
+          ccache-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}-
+          ccache-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-
+          ccache-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-
+          ccache-v3-${{ env.ANDROID_VER }}-
+          ccache-v3-    
+   
     - name: Configure ccache
       shell: bash
       run: |
         set -euo pipefail
         echo "::group::Configure ccache for maximum performance"
         
-        export CCACHE_DIR="/home/runner/.ccache"
+        export CCACHE_DIR="$HOME/.ccache"
         export CCACHE_MAXSIZE="12G"
         
-        # ✅ Persist max size to ccache config
         ccache -M "$CCACHE_MAXSIZE"
         
-        # ✅ Stable verification and normalized base path
+        # ✅ Stable verification and portable base path
         export CCACHE_COMPILERCHECK="content"
-        export CCACHE_BASEDIR="/home/runner/work/vbn/vbn"
+        export CCACHE_BASEDIR="${GITHUB_WORKSPACE}"
         export CCACHE_NOHASHDIR="true"
         
-        # ✅ Core performance features (ccache 4.9+ compatible)
+        # Core performance features
         ccache -o compression=true
         ccache -o compression_level=3
         ccache -o direct_mode=true
@@ -407,21 +404,18 @@ runs:
         ccache -o inode_cache=true
         ccache -o umask=002
         
-        # ✅ Only set depend_mode if supported (4.9+)
         if ccache --help 2>&1 | grep -q 'depend_mode'; then
           ccache -o depend_mode=true
         fi
         
-        # ✅ Validated sloppiness options for ccache 4.9
         ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale
         
-        # ✅ Minimal ignoreoptions
         export CCACHE_IGNOREOPTIONS="--sysroot*"
         
         # Persist key env settings
         {
           echo "CCACHE_COMPILERCHECK=content"
-          echo "CCACHE_BASEDIR=/home/runner/work/vbn/vbn"
+          echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}"
           echo "CCACHE_NOHASHDIR=true"
           echo "CCACHE_IGNOREOPTIONS=$CCACHE_IGNOREOPTIONS"
         } >> "$GITHUB_ENV"
@@ -430,13 +424,13 @@ runs:
         echo ""
         echo "Configuration applied:"
         echo "  Max size: 12G (persisted)"
-        echo "  Compression: zstd level 3 (default)"
+        echo "  Base dir: ${GITHUB_WORKSPACE}"
+        echo "  Compression: zstd level 3"
         echo "  Direct mode: enabled"
         echo "  File cloning: enabled"
         echo "  Inode cache: enabled"
         echo ""
         
-        # Check for existing cache
         if [ -d "$CCACHE_DIR" ] && find "$CCACHE_DIR" -type f -print -quit 2>/dev/null | grep -q .; then
           echo "✅ Restored cache found"
           echo ""
@@ -1411,21 +1405,13 @@ runs:
           echo "- **Scope:** Shared across all matrix jobs" >> $GITHUB_STEP_SUMMARY
         fi
 
-    - name: Save ccache (Success)
-      if: ${{ success() && inputs.clean != 'true' }}
+    - name: Save ccache
+      if: success()
       uses: actions/cache/save@v4
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-v2-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}
-
-    - name: Save ccache (Partial - On Failure)
-      if: ${{ failure() && inputs.clean != 'true' }}
-      uses: actions/cache/save@v4
-      continue-on-error: true
-      with:
-        path: ${{ env.CCACHE_DIR }}
-        key: ccache-v2-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-partial-${{ github.sha }}
-        
+        key: ccache-v3-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}-${{ github.run_id }}
+   
     - name: Save Build Metadata
       id: save_metadata
       shell: bash
