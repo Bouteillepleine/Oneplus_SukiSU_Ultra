@@ -1199,4 +1199,17 @@ EOF
         
         if [ -n "${{ steps.ccache_stats.outputs.hit_rate }}" ]; then
           echo "- **ccache Hit Rate:** ${{ steps.ccache_stats.outputs.hit_rate }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **ccache Direct Rate:** ${{ steps
+          echo "- ccache Direct Rate: ${{ steps.ccache_stats.outputs.direct_rate }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **ccache Hits:** ${{ steps.ccache_stats.outputs.ccache_hits }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **ccache Misses:** ${{ steps.ccache_stats.outputs.ccache_misses }}" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ -n "${{ steps.collect_stats.outputs.warnings_count }}" ]; then
+          echo "- **Compiler Warnings:** ${{ steps.collect_stats.outputs.warnings_count }}" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ -n "${{ steps.collect_stats.outputs.image_sha256 }}" ]; then
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔐 Checksums" >> $GITHUB_STEP_SUMMARY
+          echo "- **Kernel Image SHA256:** \`${{ steps.collect_stats.outputs.image_sha256 }}\`" >> $GITHUB_STEP_SUMMARY
+        fi
