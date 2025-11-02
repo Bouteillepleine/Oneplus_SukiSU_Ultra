@@ -78,7 +78,7 @@ on:
 
 jobs:
   setup:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       matrix: ${{ steps.matrix.outputs.result }}
       device_count: ${{ steps.matrix.outputs.count }}
