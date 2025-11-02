@@ -128,14 +128,14 @@ jobs:
           echo "Devices:"
           jq -r '.[] | "  - \(.model) (\(.android_version)-\(.kernel_version))"' <<<"$result"
           
-          echo "result=$(jq -cn --argjson i "$result" '{include:$i}')" >> "$GITHUB_OUTPUT"
-          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "result=$(jq -cn --argjson i "$result" '{include:$i}')" >> $GITHUB_OUTPUT
+          echo "count=$count" >> $GITHUB_OUTPUT
           
           echo "::endgroup::"
 
       - name: 📊 Build plan summary
         run: |
-          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          cat >> $GITHUB_STEP_SUMMARY << EOF
           ## 🎯 Build Plan
           
           **Target:** \`${{ inputs.op_model }}\`  
@@ -192,7 +192,18 @@ jobs:
             echo "  - SUSFS: ${{ steps.build.outputs.susfs_version }}"
             echo "  - Build time: ${{ steps.build.outputs.build_time }}s"
             echo "  - ZIP: ${{ steps.build.outputs.zip_name }}"
-            echo "  - Size: $(numfmt --to=iec-i --suffix=B "${{ steps.build.outputs.zip_size }}" 2>/dev/null || echo '${{ steps.build.outputs.zip_size }} bytes')"
+            
+            # ✅ FIXED: Safe size formatting with fallback
+            if [ -n "${{ steps.build.outputs.zip_size }}" ]; then
+              SIZE_BYTES="${{ steps.build.outputs.zip_size }}"
+              if command -v numfmt >/dev/null 2>&1; then
+                SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B "$SIZE_BYTES" 2>/dev/null || echo "${SIZE_BYTES} bytes")
+              else
+                SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1024 / 1024" | bc 2>/dev/null || echo "unknown")
+                SIZE_HUMAN="${SIZE_MB} MB"
+              fi
+              echo "  - Size: $SIZE_HUMAN"
+            fi
             
             if [ "${{ inputs.clean_build }}" != "true" ]; then
               echo "  - ccache hit rate: ${{ steps.build.outputs.ccache_hit_rate }}"
@@ -218,32 +229,43 @@ jobs:
       - name: 📝 Job summary
         if: always()
         run: |
-          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          cat >> $GITHUB_STEP_SUMMARY << EOF
           
           ### ${{ matrix.model }} - ${{ job.status == 'success' && '✅ Success' || '❌ Failed' }}
           
           EOF
           
           if [ "${{ steps.build.outcome }}" = "success" ]; then
-            cat >> "$GITHUB_STEP_SUMMARY" << EOF
+            cat >> $GITHUB_STEP_SUMMARY << EOF
           | Metric | Value |
           |--------|-------|
           | **Kernel** | ${{ steps.build.outputs.kernel_version }} |
           | **SukiSU** | v${{ steps.build.outputs.sukisu_version }} |
           | **SUSFS** | ${{ steps.build.outputs.susfs_version }} |
           | **Build Time** | ${{ steps.build.outputs.build_time }}s |
-          | **ZIP Size** | $(numfmt --to=iec-i --suffix=B "${{ steps.build.outputs.zip_size }}" 2>/dev/null || echo '${{ steps.build.outputs.zip_size }} bytes') |
           EOF
             
+            # ✅ FIXED: Safe size formatting in summary
+            if [ -n "${{ steps.build.outputs.zip_size }}" ]; then
+              SIZE_BYTES="${{ steps.build.outputs.zip_size }}"
+              if command -v numfmt >/dev/null 2>&1; then
+                SIZE_HUMAN=$(numfmt --to=iec-i --suffix=B "$SIZE_BYTES" 2>/dev/null || echo "${SIZE_BYTES} bytes")
+              else
+                SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1024 / 1024" | bc 2>/dev/null || echo "unknown")
+                SIZE_HUMAN="${SIZE_MB} MB"
+              fi
+              echo "| **ZIP Size** | $SIZE_HUMAN |" >> $GITHUB_STEP_SUMMARY
+            fi
+            
             if [ "${{ inputs.clean_build }}" != "true" ]; then
-              echo "| **ccache Hit Rate** | ${{ steps.build.outputs.ccache_hit_rate }} |" >> "$GITHUB_STEP_SUMMARY"
+              echo "| **ccache Hit Rate** | ${{ steps.build.outputs.ccache_hit_rate }} |" >> $GITHUB_STEP_SUMMARY
             fi
             
             if [ -n "${{ steps.build.outputs.warnings_count }}" ]; then
-              echo "| **Warnings** | ${{ steps.build.outputs.warnings_count }} |" >> "$GITHUB_STEP_SUMMARY"
+              echo "| **Warnings** | ${{ steps.build.outputs.warnings_count }} |" >> $GITHUB_STEP_SUMMARY
             fi
             
-            cat >> "$GITHUB_STEP_SUMMARY" << EOF
+            cat >> $GITHUB_STEP_SUMMARY << EOF
           
           **Artifact:** \`${{ steps.build.outputs.zip_name }}\`  
           **SHA256:** \`${{ steps.build.outputs.zip_sha256 }}\`
@@ -254,11 +276,8 @@ jobs:
     if: ${{ inputs.make_release }}
     needs: build
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     env:
-      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_TOKEN: ${{ secrets.PAT_TOKEN }}
     steps:
       - name: 📥 Checkout repository
         uses: actions/checkout@v4
@@ -277,41 +296,20 @@ jobs:
             tag="v1.5.12-r0"
             echo "🆕 Creating initial tag: $tag"
           else
-            rev="${latest##*-r}"
+            rev=$(echo $latest | grep -oP 'r\K\d+')
             tag="v1.5.12-r$((rev + 1))"
             echo "📈 Incrementing from $latest to $tag"
           fi
           
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "TAG=$tag" >> $GITHUB_ENV
+          echo "tag=$tag" >> $GITHUB_OUTPUT
           
-          if git rev-parse "$tag" >/dev/null 2>&1; then
-            echo "::warning::Tag $tag already exists locally"
-            existing_local=true
-          else
-            existing_local=false
-          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "Release $tag"
+          git push origin "$tag"
           
-          if git ls-remote --tags origin | grep -q "refs/tags/$tag$"; then
-            echo "::warning::Tag $tag already exists on remote - will reuse for idempotent rerun"
-            existing_remote=true
-          else
-            existing_remote=false
-          fi
-          
-          if [ "$existing_remote" = false ]; then
-            if [ "$existing_local" = true ]; then
-              git tag -d "$tag"
-            fi
-            
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git tag -a "$tag" -m "Release $tag - SukiSU Ultra with SUSFS v1.5.12"
-            git push origin "$tag"
-            echo "✅ Tag created and pushed: $tag"
-          else
-            echo "♻️ Reusing existing tag: $tag"
-          fi
-          
+          echo "✅ Tag created and pushed"
           echo "::endgroup::"
 
       - name: 📥 Download all artifacts
@@ -324,187 +322,94 @@ jobs:
         run: |
           echo "::group::Prepare release"
           
-          mkdir -p release
+          mkdir release
+          find artifacts -name "*.zip" -exec cp {} release/ \;
           
-          count=0
-          while IFS= read -r -d '' zip; do
-            cp "$zip" release/
-            ((count++))
-          done < <(find artifacts -name "*.zip" -print0)
-          
-          if [ "$count" -eq 0 ]; then
-            echo "::error::No kernel ZIPs found in artifacts"
-            exit 1
-          fi
-          
+          count=$(ls -1 release/*.zip 2>/dev/null | wc -l)
           total_size=$(du -sb release | cut -f1)
           
           echo "📦 Prepared $count kernel(s)"
-          echo "📊 Total size: $(numfmt --to=iec-i --suffix=B "$total_size")"
+          echo "📊 Total size: $(numfmt --to=iec-i --suffix=B $total_size)"
           
-          echo "count=$count" >> "$GITHUB_OUTPUT"
-          echo "total_size=$total_size" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> $GITHUB_OUTPUT
+          echo "total_size=$total_size" >> $GITHUB_OUTPUT
           
-          cat > notes.md << 'NOTES_EOF'
+          cat > notes.md << 'EOF'
           # 🚀 SukiSU Ultra with SUSFS v1.5.12
           
           ## 📱 Built Devices
-          NOTES_EOF
+          EOF
           
           for zip in release/*.zip; do
             name=$(basename "$zip" .zip)
             size=$(stat -c%s "$zip")
-            size_hr=$(numfmt --to=iec --suffix=B "$size")
-            echo "- \`$name\` ($size_hr)" >> notes.md
+            size_mb=$(echo "scale=2; $size / 1024 / 1024" | bc)
+            echo "- \`$name\` (${size_mb} MB)" >> notes.md
           done
           
-          cat >> notes.md << NOTES_EOF
+          cat >> notes.md << 'EOF'
           
           ## ✨ Features
           - ⚡ **SukiSU Ultra Manager** - Advanced root management
           - 🛡️ **SUSFS v1.5.12** - Enhanced security and hiding
           - 🌐 **WireGuard** - Built-in VPN support
-          - 💾 **ZRAM** - Memory compression (${{ inputs.enable_zram && 'enabled' || 'disabled' }})
-          - 🔧 **BBG LSM** - Baseband Guard security (${{ inputs.lsm && 'enabled' || 'disabled' }})
-          - 🎯 **Fengchi Scheduler** - (${{ inputs.sched && 'enabled' || 'disabled' }})
-          - 🚀 **Optimized Build** - ${{ inputs.optimize_level }} compiler optimization
-          - 🪝 **Hook Type** - ${{ inputs.hook }}
+          - 💾 **ZRAM** - Memory compression (optional)
+          - 🔧 **BBG LSM** - Baseband Guard security (optional)
+          - 🚀 **Optimized Build** - O2/O3 compiler optimizations
           
           ## 📥 Installation
           1. Download the ZIP for your device
           2. Flash with SukiSU Manager or custom recovery
           3. Reboot and enjoy!
           
-          ## ⚠️ Important Notes
-          - Always backup your data before flashing
-          - Make sure you have the correct kernel for your device model
-          - Check SHA256 checksums to verify integrity
-          
           ## 🔗 Links
           - [SUSFS Module](https://github.com/sidex15/ksu_module_susfs)
           - [SukiSU Manager](https://github.com/SukiSU-Ultra/SukiSU-Ultra)
           - [Report Issues](https://github.com/${{ github.repository }}/issues)
-          - [Discussion](https://github.com/${{ github.repository }}/discussions)
           
           ## 📊 Build Info
           - **Built on:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
           - **Workflow:** ${{ github.workflow }}
           - **Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-          - **Target:** \`${{ inputs.op_model }}\`
-          - **Devices Built:** $count
-          - **Clean Build:** ${{ inputs.clean_build }}
           
-          ## 🔐 Checksums
-          NOTES_EOF
-          
-          echo '```' >> notes.md
-          (cd release && sha256sum *.zip) >> notes.md
-          echo '```' >> notes.md
+          ## ⚙️ Configuration
+          - **Hook Type:** ${{ inputs.hook }}
+          - **Optimization:** ${{ inputs.optimize_level }}
+          - **ZRAM:** ${{ inputs.enable_zram }}
+          - **BBG LSM:** ${{ inputs.lsm }}
+          - **Fengchi Scheduler:** ${{ inputs.sched }}
+          EOF
           
           echo "::endgroup::"
 
-      - name: 🚀 Create or update GitHub release
+      - name: 🚀 Create GitHub release
         id: release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          echo "::group::Create/update release"
+          echo "::group::Create release"
           
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::error::GH_TOKEN is not set"
-            exit 1
-          fi
+          gh release create "$TAG" \
+            --title "🎯 OnePlus Kernels - SukiSU Ultra $TAG" \
+            --notes-file notes.md \
+            --prerelease \
+            release/*.zip
           
-          if [ -z "$TAG" ]; then
-            echo "::error::TAG is not set"
-            exit 1
-          fi
-          
-          if [ ! -f notes.md ]; then
-            echo "::error::notes.md not found"
-            exit 1
-          fi
-          
-          zip_count=$(find release -name "*.zip" -type f | wc -l)
-          if [ "$zip_count" -eq 0 ]; then
-            echo "::error::No ZIP files found in release/"
-            exit 1
-          fi
-          
-          release_title="🎯 OnePlus Kernels - SukiSU Ultra $TAG"
-          
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "::warning::Release $TAG already exists - updating notes and assets"
-            gh release edit "$TAG" \
-              --notes-file notes.md \
-              --title "$release_title"
-            echo "action=updated" >> "$GITHUB_OUTPUT"
-          else
-            echo "📋 Creating new release '$TAG' with $zip_count files"
-            gh release create "$TAG" \
-              --title "$release_title" \
-              --notes-file notes.md \
-              --prerelease
-            echo "action=created" >> "$GITHUB_OUTPUT"
-          fi
-          
-          echo "📤 Uploading assets..."
-          upload_count=0
-          failed_count=0
-          
-          for zip in release/*.zip; do
-            if [ -f "$zip" ]; then
-              filename=$(basename "$zip")
-              echo "  - $filename"
-              if gh release upload "$TAG" "$zip" --clobber 2>/dev/null; then
-                ((upload_count++))
-              else
-                echo "    ⚠️ Failed to upload $filename"
-                ((failed_count++))
-              fi
-            fi
-          done
-          
-          release_url="${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG"
-          
-          echo ""
-          action_output=$(cat "$GITHUB_OUTPUT" | grep "^action=" | cut -d= -f2)
-          echo "✅ Release $TAG $([ "$action_output" = "created" ] && echo "created" || echo "updated")"
-          echo "📦 Uploaded: $upload_count/$zip_count files"
-          if [ "$failed_count" -gt 0 ]; then
-            echo "⚠️ Failed: $failed_count files"
-          fi
-          echo "🔗 URL: $release_url"
-          
-          echo "release_url=$release_url" >> "$GITHUB_OUTPUT"
-          echo "uploaded_count=$upload_count" >> "$GITHUB_OUTPUT"
-          echo "failed_count=$failed_count" >> "$GITHUB_OUTPUT"
-          
-          if [ "$failed_count" -gt 0 ]; then
-            echo "::error::Some assets failed to upload"
-            exit 1
-          fi
+          echo "✅ Release created: $TAG"
+          echo "🔗 URL: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG"
           
           echo "::endgroup::"
 
       - name: 📝 Release summary
         if: success()
         run: |
-          TAG="${{ steps.tag.outputs.tag }}"
-          action="${{ steps.release.outputs.action }}"
-          
-          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          cat >> $GITHUB_STEP_SUMMARY << EOF
           
           ---
           
-          ## 🎉 Release $([ "$action" = "created" ] && echo "Created" || echo "Updated") Successfully
+          ## 🎉 Release Created Successfully
           
-          **Tag:** [\`$TAG\`](${{ steps.release.outputs.release_url }})  
-          **Action:** $([ "$action" = "created" ] && echo "🆕 Created new release" || echo "♻️ Updated existing release")  
+          **Tag:** [\`${{ steps.tag.outputs.tag }}\`](${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ steps.tag.outputs.tag }})  
           **Kernels:** ${{ steps.prepare.outputs.count }}  
-          **Uploaded:** ${{ steps.release.outputs.uploaded_count }}  
-          **Total Size:** $(numfmt --to=iec-i --suffix=B "${{ steps.prepare.outputs.total_size }}")
+          **Total Size:** $(numfmt --to=iec-i --suffix=B ${{ steps.prepare.outputs.total_size }})
           
           ### 📦 Assets
           EOF
@@ -512,70 +417,26 @@ jobs:
           for zip in release/*.zip; do
             name=$(basename "$zip")
             size=$(stat -c%s "$zip")
-            size_hr=$(numfmt --to=iec --suffix=B "$size")
-            sha256=$(sha256sum "$zip" | cut -d' ' -f1)
-            echo "- \`$name\` ($size_hr)" >> "$GITHUB_STEP_SUMMARY"
-            echo "  - SHA256: \`${sha256:0:16}...${sha256: -16}\`" >> "$GITHUB_STEP_SUMMARY"
+            size_mb=$(echo "scale=2; $size / 1024 / 1024" | bc)
+            echo "- \`$name\` (${size_mb} MB)" >> $GITHUB_STEP_SUMMARY
           done
           
-          cat >> "$GITHUB_STEP_SUMMARY" << 'EOF'
+          cat >> $GITHUB_STEP_SUMMARY << EOF
           
           ### ⚙️ Build Configuration
-          EOF
-          
-          cat >> "$GITHUB_STEP_SUMMARY" << EOF
-          | Setting | Value |
-          |---------|-------|
-          | **Target** | \`${{ inputs.op_model }}\` |
-          | **Hook** | \`${{ inputs.hook }}\` |
-          | **Optimization** | \`${{ inputs.optimize_level }}\` |
-          | **ZRAM** | ${{ inputs.enable_zram }} |
-          | **BBG LSM** | ${{ inputs.lsm }} |
-          | **Fengchi** | ${{ inputs.sched }} |
-          | **Clean Build** | ${{ inputs.clean_build }} |
-          
-          <details>
-          <summary>📋 Plain text configuration</summary>
-          
-          - **Target:** \`${{ inputs.op_model }}\`
-          - **Hook:** \`${{ inputs.hook }}\`
-          - **Optimization:** \`${{ inputs.optimize_level }}\`
+          - **Hook Type:** ${{ inputs.hook }}
+          - **Optimization:** ${{ inputs.optimize_level }}
           - **ZRAM:** ${{ inputs.enable_zram }}
           - **BBG LSM:** ${{ inputs.lsm }}
-          - **Fengchi:** ${{ inputs.sched }}
+          - **Fengchi Scheduler:** ${{ inputs.sched }}
           - **Clean Build:** ${{ inputs.clean_build }}
-          
-          </details>
-          
-          ### 🔗 Quick Links
-          - [View Release](${{ steps.release.outputs.release_url }})
-          - [Download All Assets](${{ steps.release.outputs.release_url }})
-          - [Workflow Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
           EOF
 
       - name: 🧹 Cleanup on failure
         if: failure()
-        env:
-          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           echo "::group::Cleanup failed release"
-          
-          if [ -n "$TAG" ]; then
-            if gh release view "$TAG" >/dev/null 2>&1; then
-              download_count=$(gh release view "$TAG" --json assets --jq '[.assets[].downloadCount] | add // 0')
-              
-              if [ "$download_count" -eq 0 ]; then
-                echo "🗑️ Deleting newly created release with no downloads"
-                gh release delete "$TAG" --yes 2>/dev/null && echo "✅ Deleted release $TAG" || echo "⚠️ Could not delete release $TAG"
-                git push origin --delete "$TAG" 2>/dev/null && echo "✅ Deleted remote tag $TAG" || echo "⚠️ Could not delete remote tag $TAG"
-              else
-                echo "⚠️ Release has $download_count downloads - keeping it"
-              fi
-            fi
-            
-            git tag -d "$TAG" 2>/dev/null && echo "✅ Deleted local tag $TAG" || echo "⚠️ Local tag $TAG not found"
-          else
-            echo "⚠️ TAG not set, skipping cleanup"
-          fi
-          
+          git push origin --delete "$TAG" 2>/dev/null || true
+          git tag -d "$TAG" 2>/dev/null || true
+          echo "✅ Cleanup completed"
           echo "::endgroup::"
