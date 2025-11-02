@@ -141,6 +141,27 @@ runs:
         echo "✅ Dependencies installed"
         echo "::endgroup::"
 
+    - name: 🧹 Free disk space
+      shell: bash
+      run: |
+        set -e
+        echo "::group::Free disk space"
+        
+        echo "Before cleanup:"
+        df -h /
+        
+        # Remove large unused packages
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        sudo docker system prune -af || true
+        sudo rm -rf /var/lib/apt/lists/*
+        sudo apt-get clean
+        
+        echo ""
+        echo "After cleanup:"
+        df -h /
+        
+        echo "::endgroup::"
+
     - name: Setup Base Environment
       shell: bash
       run: |
@@ -1089,9 +1110,29 @@ runs:
         KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
         cd "$KERNEL_PATH/common"
         mkdir -p out
-        CUSTOM_LOCALVERSION="-${{ env.ANDROID_VER }}-OP-⚡UltraBolt⚡"
+        CUSTOM_LOCALVERSION="-${{ env.ANDROID_VER }}-OP-UltraBolt"
         echo "CUSTOM_LOCALVERSION=$CUSTOM_LOCALVERSION" >> "$GITHUB_ENV"
-        echo "Kernel branding: $CUSTOM_LOCALVERSION"    
+        echo "Kernel branding: $CUSTOM_LOCALVERSION"
+
+    - name: ⚠️ Ensure enough disk space
+      shell: bash
+      run: |
+        set -e
+        echo "::group::Disk space validation"
+        
+        avail=$(df --output=avail -k / | tail -1)
+        avail_gb=$(echo "scale=2; $avail / 1024 / 1024" | bc)
+        
+        echo "Available disk space: ${avail_gb} GB"
+        
+        if [ "$avail" -lt $((14 * 1024 * 1024)) ]; then
+          echo "::error::Not enough disk space (need >=14 GB free, have ${avail_gb} GB)"
+          df -h /
+          exit 1
+        fi
+        
+        echo "✅ Sufficient disk space available"
+        echo "::endgroup::"
 
     - name: Build Kernel
       shell: bash
