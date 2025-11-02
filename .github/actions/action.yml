@@ -366,7 +366,7 @@ runs:
         export CCACHE_DIR="/home/runner/.ccache"
         export CCACHE_MAXSIZE="30G"
         
-        # ✅ CRITICAL: Persist max size to ccache config
+        # ✅ Persist max size to ccache config
         ccache -M "$CCACHE_MAXSIZE"
         
         # ✅ Stable verification and normalized base path
@@ -374,30 +374,27 @@ runs:
         export CCACHE_BASEDIR="/home/runner/work/vbn/vbn"
         export CCACHE_NOHASHDIR="true"
         
-        # ✅ Performance features via config
+        # ✅ Core performance features (ccache 4.9+ compatible)
         ccache -o compression=true
         ccache -o compression_level=3
-        
-        # Only set compression_type if supported
-        if ccache --help | grep -q 'compression_type'; then
-          ccache -o compression_type=zstd
-        fi
-        
         ccache -o direct_mode=true
-        ccache -o readonly_direct=true
         ccache -o hash_dir=false
         ccache -o file_clone=true
         ccache -o inode_cache=true
-        ccache -o depend=true
         ccache -o umask=002
         
-        # ✅ Comprehensive sloppiness for maximum cache hits
-        ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale,random_seed,preprocessor_defines,include_file_hash
+        # ✅ Only set depend_mode if supported (4.9+)
+        if ccache --help 2>&1 | grep -q 'depend_mode'; then
+          ccache -o depend_mode=true
+        fi
+        
+        # ✅ Validated sloppiness options for ccache 4.9
+        ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale
         
         # ✅ Minimal ignoreoptions
         export CCACHE_IGNOREOPTIONS="--sysroot*"
         
-        # Persist key env settings for sub-makes
+        # Persist key env settings
         {
           echo "CCACHE_COMPILERCHECK=content"
           echo "CCACHE_BASEDIR=/home/runner/work/vbn/vbn"
@@ -409,13 +406,13 @@ runs:
         echo ""
         echo "Configuration applied:"
         echo "  Max size: $CCACHE_MAXSIZE (persisted)"
-        echo "  Compression: enabled (level 3)"
-        echo "  Direct mode: enabled with readonly_direct"
+        echo "  Compression: zstd level 3 (default)"
+        echo "  Direct mode: enabled"
         echo "  File cloning: enabled"
         echo "  Inode cache: enabled"
         echo ""
         
-        # ✅ Robust cache detection
+        # Check for existing cache
         if [ -d "$CCACHE_DIR" ] && find "$CCACHE_DIR" -type f -print -quit 2>/dev/null | grep -q .; then
           echo "✅ Restored cache found"
           echo ""
