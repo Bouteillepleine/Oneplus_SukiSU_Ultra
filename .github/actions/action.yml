@@ -355,11 +355,11 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        export CCACHE_DIR="${{ env.CCACHE_DIR }}"
-        export CCACHE_MAXSIZE="${{ env.CCACHE_MAXSIZE }}"
+        export CCACHE_DIR="/home/runner/.ccache"
+        export CCACHE_MAXSIZE="20G"
         
         export CCACHE_COMPILERCHECK="content"
-        export CCACHE_BASEDIR="${{ github.workspace }}"
+        export CCACHE_BASEDIR="/home/runner/work/vbn/vbn"
         export CCACHE_NOHASHDIR="true"
         export CCACHE_HARDLINK="true"
         export CCACHE_IGNOREOPTIONS="--sysroot* -fmacro-prefix-map=*"
@@ -370,13 +370,12 @@ runs:
         ccache -o compression_level=6
         ccache -o direct_mode=true
         ccache -o hash_dir=false
-        ccache -o cpp2=true
+        # ccache -o cpp2=true  ← REMOVED (obsolete option)
         ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale,random_seed
         
         {
-          echo "CCACHE_CPP2=true"
           echo "CCACHE_COMPILERCHECK=content"
-          echo "CCACHE_BASEDIR=${{ github.workspace }}"
+          echo "CCACHE_BASEDIR=/home/runner/work/vbn/vbn"
           echo "CCACHE_NOHASHDIR=true"
           echo "CCACHE_HARDLINK=true"
           echo "CCACHE_IGNOREOPTIONS=--sysroot* -fmacro-prefix-map=*"
