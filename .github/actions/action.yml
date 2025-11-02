@@ -1016,8 +1016,10 @@ runs:
         CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y
         CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y
         CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+        
         CONFIG_TMPFS_XATTR=y
         CONFIG_TMPFS_POSIX_ACL=y
+        
         CONFIG_TCP_CONG_ADVANCED=y
         CONFIG_TCP_CONG_BBR=y
         CONFIG_NET_SCH_FQ=y
@@ -1025,6 +1027,7 @@ runs:
         CONFIG_IP_ECN=y
         CONFIG_TCP_ECN=y
         CONFIG_IPV6_ECN=y
+        
         CONFIG_IP_NF_TARGET_ECN=y
         CONFIG_IP_NF_TARGET_TTL=y
         CONFIG_IP6_NF_TARGET_HL=y
@@ -1350,7 +1353,7 @@ runs:
         echo "::endgroup::"
 
     - name: 📊 ccache Post-Build Statistics
-      id: ccache_stats  # ✅ ADD THIS ID
+      id: ccache_stats
       if: ${{ always() && inputs.clean != 'true' }}
       shell: bash
       run: |
@@ -1401,7 +1404,7 @@ runs:
           echo "  Overall hit rate: ${HIT_RATE}%"
           echo "  Direct hit rate: ${DIRECT_RATE}%"
           
-          # ✅ CRITICAL: Export to outputs
+          # ✅ Export to outputs for use in summary
           echo "hit_rate=${HIT_RATE}%" >> "$GITHUB_OUTPUT"
           echo "direct_rate=${DIRECT_RATE}%" >> "$GITHUB_OUTPUT"
           
@@ -1428,23 +1431,14 @@ runs:
         
         echo "::endgroup::"
         
-        # Add to GitHub summary
+        # ✅ SIMPLIFIED: Only show raw ccache output in summary
         echo "## 📊 ccache Statistics" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo '```' >> $GITHUB_STEP_SUMMARY
         ccache -s >> $GITHUB_STEP_SUMMARY
         echo '```' >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        
-        if [ "${CACHEABLE:-0}" -gt 0 ]; then
-          echo "### Cache Performance" >> $GITHUB_STEP_SUMMARY
-          echo "- **Hit Rate:** ${HIT_RATE}%" >> $GITHUB_STEP_SUMMARY
-          echo "- **Direct Hit Rate:** ${DIRECT_RATE}%" >> $GITHUB_STEP_SUMMARY
-          echo "- **Total Hits:** $HITS" >> $GITHUB_STEP_SUMMARY
-          echo "- **Cacheable Calls:** $CACHEABLE" >> $GITHUB_STEP_SUMMARY
-          echo "- **Cache Size:** $CACHE_SIZE" >> $GITHUB_STEP_SUMMARY
-          echo "- **Scope:** Shared across all matrix jobs" >> $GITHUB_STEP_SUMMARY
-        fi
+        echo "> **Note:** Detailed metrics are shown in the Build Statistics section below" >> $GITHUB_STEP_SUMMARY
 
     - name: Save ccache
       if: success()
@@ -1951,7 +1945,13 @@ runs:
           echo "- **Build Time:** ${BUILD_MIN}m ${BUILD_SEC}s" >> $GITHUB_STEP_SUMMARY
         fi
         
-        # ✅ REMOVED: Duplicate ccache stats section
+        # ✅ ADD CCACHE STATS FROM STEP OUTPUT
+        if [ "${{ inputs.clean }}" != "true" ]; then
+          if [ -n "${{ steps.ccache_stats.outputs.hit_rate }}" ]; then
+            echo "- **ccache Hit Rate:** ${{ steps.ccache_stats.outputs.hit_rate }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **ccache Direct Rate:** ${{ steps.ccache_stats.outputs.direct_rate }}" >> $GITHUB_STEP_SUMMARY
+          fi
+        fi
         
         if [ -n "${{ steps.collect_stats.outputs.warnings_count }}" ]; then
           echo "- **Warnings:** ${{ steps.collect_stats.outputs.warnings_count }}" >> $GITHUB_STEP_SUMMARY
@@ -1965,8 +1965,8 @@ runs:
           echo "- **Image SHA256:** \`${{ steps.collect_stats.outputs.image_sha256 }}\`" >> $GITHUB_STEP_SUMMARY
         fi
         
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
+        echo "" >> $GITHUB_STEP_SUMMARY     
+                
         if [ "${{ inputs.enable_zram }}" = "true" ]; then
           echo "### 🔧 Additional Modules" >> $GITHUB_STEP_SUMMARY
           if [ "${{ steps.zram_find.outputs.upload }}" = "true" ]; then
