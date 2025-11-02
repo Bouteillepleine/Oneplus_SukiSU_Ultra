@@ -78,54 +78,151 @@ on:
 
 jobs:
   setup:
+    name: 🔧 Setup Build Matrix
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
+      total_configs: ${{ steps.matrix.outputs.total_configs }}
+      filtered_count: ${{ steps.matrix.outputs.filtered_count }}
     steps:
-      - uses: actions/checkout@v4
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
         with:
           sparse-checkout: configs/
 
-      - id: matrix
+      - name: 🔍 Generate build matrix
+        id: matrix
         run: |
-          set -e
-          [ -d configs ] || exit 1
+          set -euo pipefail
+          echo "::group::Matrix Generation"
           
+          echo "📋 Validating configs directory..."
+          [ -d configs ] || { echo "::error::configs/ directory not found"; exit 1; }
+          
+          echo "🔎 Scanning JSON configuration files..."
           tmp=()
+          config_count=0
           for f in configs/*.json; do
-            jq empty "$f" 2>/dev/null && tmp+=("$(jq -c '.' "$f")")
+            if [ -f "$f" ]; then
+              echo "  → Validating: $(basename "$f")"
+              if jq empty "$f" 2>/dev/null; then
+                tmp+=("$(jq -c '.' "$f")")
+                ((config_count++))
+              else
+                echo "  ⚠️ Invalid JSON: $f"
+              fi
+            fi
           done
-          [ ${#tmp[@]} -gt 0 ] || exit 1
+          
+          [ ${#tmp[@]} -gt 0 ] || { echo "::error::No valid configs found"; exit 1; }
+          echo "✅ Found $config_count valid configuration(s)"
           
           printf '%s\n' "${tmp[@]}" | jq -s '.' > m.json
           
           input="${{ inputs.op_model }}"
+          echo ""
+          echo "🎯 Filter criteria: $input"
+          
           if [[ "$input" == "ALL" ]]; then
             filter='.'
+            echo "  → Building ALL configurations"
           elif [[ "$input" == android*-* ]]; then
-            av="${input%-*}"; kv="${input#*-}"
+            av="${input%-*}"
+            kv="${input#*-}"
             filter="map(select(.android_version==\"$av\" and .kernel_version==\"$kv\"))"
+            echo "  → Filtering by Android: $av, Kernel: $kv"
           else
             filter="map(select(.model==\"$input\"))"
+            echo "  → Filtering by model: $input"
           fi
           
           filtered=$(jq -c "$filter" m.json)
-          [ "$(jq 'length' <<<"$filtered")" -gt 0 ] || exit 1
+          filtered_count=$(jq 'length' <<<"$filtered")
           
+          [ "$filtered_count" -gt 0 ] || { 
+            echo "::error::No configurations match filter: $input"
+            exit 1
+          }
+          
+          echo ""
+          echo "📊 Matrix Statistics:"
+          echo "  • Total configs: $config_count"
+          echo "  • Filtered configs: $filtered_count"
+          echo "  • Match rate: $(awk "BEGIN {printf \"%.1f\", ($filtered_count/$config_count)*100}")%"
+          
+          echo ""
+          echo "🏗️ Build targets:"
+          jq -r '.[] | "  → \(.model) (\(.android_version)-\(.kernel_version))"' <<<"$filtered"
+          
+          echo ""
           echo "matrix<<EOF" >> $GITHUB_OUTPUT
           jq -n --argjson i "$filtered" '{include:$i}' >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
+          
+          echo "total_configs=$config_count" >> $GITHUB_OUTPUT
+          echo "filtered_count=$filtered_count" >> $GITHUB_OUTPUT
+          
+          echo "::endgroup::"
+
+      - name: 📊 Matrix Summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## 🔧 Build Matrix Configuration
+          
+          ### 📋 Statistics
+          - **Total Configurations:** ${{ steps.matrix.outputs.total_configs }}
+          - **Selected for Build:** ${{ steps.matrix.outputs.filtered_count }}
+          - **Filter Applied:** \`${{ inputs.op_model }}\`
+          
+          ### ⚙️ Build Options
+          - **Hook Type:** ${{ inputs.hook }}
+          - **BBG LSM:** ${{ inputs.lsm }}
+          - **Fengchi Scheduler:** ${{ inputs.sched }}
+          - **ZRAM:** ${{ inputs.enable_zram }}
+          - **Optimization:** ${{ inputs.optimize_level }}
+          - **Clean Build:** ${{ inputs.clean_build }}
+          
+          ---
+          EOF
 
   build:
+    name: 🏗️ ${{ matrix.model }} (${{ matrix.android_version }}-${{ matrix.kernel_version }})
     needs: setup
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     strategy:
       fail-fast: false
+      max-parallel: 3
       matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
+    
     steps:
-      - uses: actions/checkout@v4
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
 
-      - id: build
+      - name: 💾 System information
+        run: |
+          echo "::group::System Information"
+          echo "🖥️ Runner Details:"
+          echo "  • OS: $(lsb_release -ds)"
+          echo "  • Kernel: $(uname -r)"
+          echo "  • CPU: $(nproc) cores"
+          echo "  • RAM: $(free -h | awk '/^Mem:/ {print $2}')"
+          echo "  • Disk: $(df -h / | awk 'NR==2 {print $4}') available"
+          echo ""
+          echo "📦 Build Configuration:"
+          echo "  • Model: ${{ matrix.model }}"
+          echo "  • SoC: ${{ matrix.soc }}"
+          echo "  • Android: ${{ matrix.android_version }}"
+          echo "  • Kernel: ${{ matrix.kernel_version }}"
+          echo "  • Branch: ${{ matrix.branch }}"
+          echo "::endgroup::"
+
+      - name: ⏱️ Build start timestamp
+        id: start_time
+        run: echo "timestamp=$(date +%s)" >> $GITHUB_OUTPUT
+
+      - name: 🏗️ Execute build
+        id: build
         uses: ./.github/actions
         with:
           op_config_json: ${{ toJSON(matrix) }}
@@ -138,71 +235,261 @@ jobs:
           clean: ${{ inputs.clean_build }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - run: |
-          for k in kernel_version sukisu_version susfs_version image_sha256 zip_name; do
-            case "$k" in
-              kernel_version) v="${{ steps.build.outputs.kernel_version }}" ;;
-              sukisu_version) v="${{ steps.build.outputs.sukisu_version }}" ;;
-              susfs_version) v="${{ steps.build.outputs.susfs_version }}" ;;
-              image_sha256) v="${{ steps.build.outputs.image_sha256 }}" ;;
-              zip_name) v="${{ steps.build.outputs.zip_name }}" ;;
-            esac
-            [ -n "$v" ] || exit 1
-          done
+      - name: ⏱️ Calculate build duration
+        id: duration
+        if: always()
+        run: |
+          start=${{ steps.start_time.outputs.timestamp }}
+          end=$(date +%s)
+          duration=$((end - start))
+          minutes=$((duration / 60))
+          seconds=$((duration % 60))
+          echo "duration=${duration}" >> $GITHUB_OUTPUT
+          echo "formatted=${minutes}m ${seconds}s" >> $GITHUB_OUTPUT
+          
+          echo "::notice::Build completed in ${minutes}m ${seconds}s"
 
-      - uses: actions/upload-artifact@v4
+      - name: ✅ Validate build outputs
+        run: |
+          echo "::group::Output Validation"
+          
+          required_outputs=(
+            "kernel_version:${{ steps.build.outputs.kernel_version }}"
+            "sukisu_version:${{ steps.build.outputs.sukisu_version }}"
+            "susfs_version:${{ steps.build.outputs.susfs_version }}"
+            "image_sha256:${{ steps.build.outputs.image_sha256 }}"
+            "zip_name:${{ steps.build.outputs.zip_name }}"
+          )
+          
+          all_valid=true
+          for item in "${required_outputs[@]}"; do
+            key="${item%%:*}"
+            value="${item#*:}"
+            if [ -z "$value" ]; then
+              echo "::error::Missing output: $key"
+              all_valid=false
+            else
+              echo "✅ $key: $value"
+            fi
+          done
+          
+          $all_valid || exit 1
+          echo "::endgroup::"
+
+      - name: 📊 Build statistics
+        if: always()
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## 📊 Build Statistics - ${{ matrix.model }}
+          
+          ### ⏱️ Performance
+          - **Build Duration:** ${{ steps.duration.outputs.formatted }}
+          - **ccache Hit Rate:** ${{ steps.build.outputs.ccache_hit_rate || 'N/A' }}
+          - **Warnings Count:** ${{ steps.build.outputs.warnings_count || '0' }}
+          
+          ### 📦 Artifacts
+          - **Kernel Version:** ${{ steps.build.outputs.kernel_version }}
+          - **SukiSU Version:** ${{ steps.build.outputs.sukisu_version }}
+          - **SUSFS Version:** ${{ steps.build.outputs.susfs_version }}
+          - **Output File:** \`${{ steps.build.outputs.zip_name }}\`
+          - **Image SHA256:** \`${{ steps.build.outputs.image_sha256 }}\`
+          
+          ### 🔧 Configuration
+          - **Model:** ${{ matrix.model }}
+          - **SoC:** ${{ matrix.soc }}
+          - **Android:** ${{ matrix.android_version }}
+          - **Kernel:** ${{ matrix.kernel_version }}
+          - **Hook:** ${{ inputs.hook }}
+          - **Optimization:** ${{ inputs.optimize_level }}
+          
+          ---
+          EOF
+
+      - name: 📤 Upload kernel artifact
+        uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.model }}-kernel
           path: ${{ matrix.model }}/artifacts/${{ steps.build.outputs.zip_name }}
           retention-days: 30
           compression-level: 0
+          if-no-files-found: error
+
+      - name: 🎉 Build success notification
+        if: success()
+        run: |
+          echo "::notice title=${{ matrix.model }}::✅ Build completed successfully in ${{ steps.duration.outputs.formatted }}"
 
   release:
+    name: 🚀 Create Release
     needs: build
     if: ${{ inputs.make_release && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+    
     steps:
-      - uses: actions/checkout@v4
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - run: command -v jq >/dev/null || sudo apt-get update -qq && sudo apt-get install -y jq
-
-      - id: tag
+      - name: 🔧 Install dependencies
         run: |
+          echo "::group::Install jq"
+          command -v jq >/dev/null || {
+            sudo apt-get update -qq
+            sudo apt-get install -y jq
+          }
+          jq --version
+          echo "::endgroup::"
+
+      - name: 🏷️ Generate release tag
+        id: tag
+        run: |
+          echo "::group::Tag Generation"
+          
           git fetch --tags -q
-          latest=$(gh api repos/${{ github.repository }}/tags --paginate --jq '[.[]|.name|select(test("^v1\\.5\\.12-r\\d+$"))]|sort_by(sub(".*-r","")|tonumber)|last//empty')
-          new=$([ -z "$latest" ] && echo "v1.5.12-r0" || echo "v1.5.12-r$(( $(sed -n 's/.*-r\([0-9]\+\)$/\1/p' <<<"$latest") + 1 ))")
+          echo "📋 Fetching existing tags..."
+          
+          latest=$(gh api repos/${{ github.repository }}/tags \
+            --paginate \
+            --jq '[.[]|.name|select(test("^v1\\.5\\.12-r\\d+$"))]|sort_by(sub(".*-r","")|tonumber)|last//empty')
+          
+          if [ -z "$latest" ]; then
+            new="v1.5.12-r0"
+            echo "🆕 No previous releases found"
+          else
+            rev=$(sed -n 's/.*-r\([0-9]\+\)$/\1/p' <<<"$latest")
+            new="v1.5.12-r$((rev + 1))"
+            echo "📌 Latest release: $latest"
+          fi
+          
+          echo "🎯 New release tag: $new"
           echo "tag=$new" >> $GITHUB_OUTPUT
           
-          if git rev-parse -q --verify "refs/tags/$new" >/dev/null || git ls-remote --tags origin "$new" | grep -q "$new$"; then
+          if git rev-parse -q --verify "refs/tags/$new" >/dev/null || \
+             git ls-remote --tags origin "$new" | grep -q "$new$"; then
+            echo "⚠️ Tag already exists"
             echo "exists=true" >> $GITHUB_OUTPUT
           else
+            echo "✅ Creating new tag"
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git tag -a "$new" -m "Release $new"
+            git tag -a "$new" -m "Release $new - SukiSU Ultra & SUSFS v1.5.12"
             git push origin "refs/tags/$new"
             echo "exists=false" >> $GITHUB_OUTPUT
           fi
+          
+          echo "::endgroup::"
 
-      - uses: actions/download-artifact@v4
+      - name: 📥 Download all artifacts
+        uses: actions/download-artifact@v4
         with:
           path: artifacts
 
-      - run: |
-          mkdir -p release
-          find artifacts -name '*.zip' -exec cp {} release/ \;
-          [ "$(find release -name '*.zip' | wc -l)" -gt 0 ] || exit 1
-
-      - run: echo "# SukiSU Ultra + SUSFS v1.5.12" > notes.md
-
-      - if: steps.tag.outputs.exists != 'true'
+      - name: 📦 Prepare release assets
+        id: assets
         run: |
+          echo "::group::Asset Preparation"
+          
+          mkdir -p release
+          echo "📂 Collecting kernel packages..."
+          
+          count=0
+          total_size=0
+          
+          while IFS= read -r -d '' zip; do
+            cp "$zip" release/
+            size=$(stat -c%s "$zip" 2>/dev/null || stat -f%z "$zip")
+            total_size=$((total_size + size))
+            ((count++))
+            echo "  ✅ $(basename "$zip") ($(numfmt --to=iec-i --suffix=B $size 2>/dev/null || echo "$size bytes"))"
+          done < <(find artifacts -name '*.zip' -print0)
+          
+          [ "$count" -gt 0 ] || { 
+            echo "::error::No kernel packages found"
+            exit 1
+          }
+          
+          echo ""
+          echo "📊 Release Statistics:"
+          echo "  • Total packages: $count"
+          echo "  • Total size: $(numfmt --to=iec-i --suffix=B $total_size 2>/dev/null || echo "$total_size bytes")"
+          
+          echo "count=$count" >> $GITHUB_OUTPUT
+          echo "size=$(numfmt --to=iec-i --suffix=B $total_size 2>/dev/null || echo "$total_size bytes")" >> $GITHUB_OUTPUT
+          
+          echo "::endgroup::"
+
+      - name: 📝 Generate release notes
+        run: |
+          cat > notes.md << 'EOF'
+          # 🎉 SukiSU Ultra + SUSFS v1.5.12
+          
+          ## 📦 Release Information
+          
+          This release contains **${{ steps.assets.outputs.count }}** kernel package(s) with a total size of **${{ steps.assets.outputs.size }}**.
+          
+          ### ✨ Features
+          - ⚡ **SukiSU Ultra** - Advanced root management
+          - 🛡️ **SUSFS** - Secure userspace filesystem
+          - 🔧 **Hook Type:** ${{ inputs.hook }}
+          - 🚀 **Optimization:** ${{ inputs.optimize_level }}
+          
+          ### 📋 Build Configuration
+          - **BBG LSM:** ${{ inputs.lsm }}
+          - **Fengchi Scheduler:** ${{ inputs.sched }}
+          - **ZRAM Support:** ${{ inputs.enable_zram }}
+          - **Clean Build:** ${{ inputs.clean_build }}
+          
+          ### 📥 Installation
+          1. Download the appropriate kernel package for your device
+          2. Flash via Suki Manager to enable KPM or Kernel Flasher
+          3. Reboot and enjoy!
+          
+          ### ⚠️ Important Notes
+          - Always backup your data before flashing
+          - This is a prerelease version - use at your own risk
+          - Report issues on GitHub with detailed logs
+          
+          ---
+          *Built with ❤️ using GitHub Actions*
+          EOF
+
+      - name: 🚀 Create GitHub release
+        if: steps.tag.outputs.exists != 'true'
+        run: |
+          echo "::group::Release Creation"
+          
           gh release create "${{ steps.tag.outputs.tag }}" \
             --repo "${{ github.repository }}" \
-            --title "OnePlus Kernels - SukiSU Ultra & SUSFS v1.5.12" \
+            --title "🎉 OnePlus Kernels - SukiSU Ultra & SUSFS v1.5.12" \
             --notes-file notes.md \
             --prerelease \
             release/*.zip
+          
+          echo "✅ Release created: ${{ steps.tag.outputs.tag }}"
+          echo "::endgroup::"
+
+      - name: 📊 Release summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## 🚀 Release Created
+          
+          ### 🏷️ Tag Information
+          - **Release Tag:** \`${{ steps.tag.outputs.tag }}\`
+          - **Release URL:** https://github.com/${{ github.repository }}/releases/tag/${{ steps.tag.outputs.tag }}
+          
+          ### 📦 Assets
+          - **Package Count:** ${{ steps.assets.outputs.count }}
+          - **Total Size:** ${{ steps.assets.outputs.size }}
+          
+          ### ✅ Status
+          Release successfully published to GitHub! 🎉
+          
+          ---
+          EOF
+
+      - name: 🎊 Success notification
+        run: |
+          echo "::notice::🎉 Release ${{ steps.tag.outputs.tag }} created successfully with ${{ steps.assets.outputs.count }} package(s)"
