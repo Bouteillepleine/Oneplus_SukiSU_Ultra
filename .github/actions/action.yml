@@ -1176,14 +1176,14 @@ runs:
           echo "**Filename:** \`${{ steps.create_zip.outputs.zip_name }}\`" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          if [ -n "${ZIP_SIZE:-}" ]; then
-            SIZE_MB=$(echo "scale=2; ${ZIP_SIZE} / 1024 / 1024" | bc)
+          if [ -n "${{ steps.create_zip.outputs.zip_size }}" ]; then
+            SIZE_MB=$(echo "scale=2; ${{ steps.create_zip.outputs.zip_size }} / 1024 / 1024" | bc)
             echo "**Size:** ${SIZE_MB} MB" >> $GITHUB_STEP_SUMMARY
           fi
           
-          if [ -n "${ZIP_SHA256:-}" ]; then
+          if [ -n "${{ steps.create_zip.outputs.zip_sha256 }}" ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "**SHA256:** \`${ZIP_SHA256}\`" >> $GITHUB_STEP_SUMMARY
+            echo "**SHA256:** \`${{ steps.create_zip.outputs.zip_sha256 }}\`" >> $GITHUB_STEP_SUMMARY
           fi
         fi
         
@@ -1199,7 +1199,7 @@ runs:
         
         if [ -n "${{ steps.ccache_stats.outputs.hit_rate }}" ]; then
           echo "- **ccache Hit Rate:** ${{ steps.ccache_stats.outputs.hit_rate }}" >> $GITHUB_STEP_SUMMARY
-          echo "- ccache Direct Rate: ${{ steps.ccache_stats.outputs.direct_rate }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **ccache Direct Rate:** ${{ steps.ccache_stats.outputs.direct_rate }}" >> $GITHUB_STEP_SUMMARY
           echo "- **ccache Hits:** ${{ steps.ccache_stats.outputs.ccache_hits }}" >> $GITHUB_STEP_SUMMARY
           echo "- **ccache Misses:** ${{ steps.ccache_stats.outputs.ccache_misses }}" >> $GITHUB_STEP_SUMMARY
         fi
