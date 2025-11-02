@@ -159,7 +159,6 @@ runs:
         mkdir -p "$CONFIG"
         cd "$CONFIG"
         
-        # ✅ FIXED: Use correct branch variable
         if [[ "$OP_MANIFEST" == http* ]]; then
           repo init -u "$OP_MANIFEST" -b "$OP_BRANCH" --depth=1 --git-lfs
         else
@@ -193,7 +192,6 @@ runs:
         set -euo pipefail
         echo "::group::Configure ccache environment"
         
-        # ✅ CRITICAL FIX: Per-job isolated cache on /mnt (more space)
         CACHE_DIR="/mnt/ccache/${OP_MODEL}"
         sudo mkdir -p "$CACHE_DIR"
         sudo chown "$USER:$USER" "$CACHE_DIR"
@@ -231,7 +229,6 @@ runs:
         set -euo pipefail
         echo "::group::Configure ccache"
         
-        # ✅ FIXED: Use environment variables instead of hardcoding
         export CCACHE_DIR="${CCACHE_DIR:-$HOME/.ccache}"
         export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-30G}"
         export CCACHE_BASEDIR="${CCACHE_BASEDIR:-${GITHUB_WORKSPACE}}"
@@ -251,9 +248,10 @@ runs:
         ccache --set-config=file_clone=true
         ccache --set-config=inode_cache=true
         ccache --set-config=readonly_direct=true
+        ccache --set-config=compiler_check=content
         
         ccache -z
-        ccache -p | grep -E "(max_size|cache_dir|base_dir|compression|direct_mode|sloppiness)"
+        ccache -p | grep -E "(max_size|cache_dir|base_dir|compression|direct_mode|sloppiness|compiler_check)"
         
         echo "✅ ccache configured"
         echo "::endgroup::"
@@ -279,7 +277,7 @@ runs:
         set -euo pipefail
         echo "::group::Apply KernelSU patches"
         
-        CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
+        CONFIG_DIR="$GITHUB_WORKSPACE/${OP_MODEL}"
         KERNEL_PATH="$CONFIG_DIR/kernel_platform"
         COMMON="$KERNEL_PATH/common"
         
@@ -318,7 +316,7 @@ runs:
         set -euo pipefail
         echo "::group::Configure kernel"
         
-        CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
+        CONFIG_DIR="$GITHUB_WORKSPACE/${OP_MODEL}"
         COMMON="$CONFIG_DIR/kernel_platform/common"
         
         cd "$COMMON"
@@ -390,7 +388,7 @@ runs:
         set -euo pipefail
         echo "::group::Build kernel"
         
-        CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
+        CONFIG_DIR="$GITHUB_WORKSPACE/${OP_MODEL}"
         KERNEL_PATH="$CONFIG_DIR/kernel_platform"
         COMMON="$KERNEL_PATH/common"
         
@@ -597,7 +595,7 @@ EOF
       run: |
         set +e
         echo "::group::Build Failure Analysis"
-        COMMON="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
+        COMMON="$GITHUB_WORKSPACE/${OP_MODEL}/kernel_platform/common"
         
         echo "## 🔴 Build Failed - Last 120 Lines" >> "$GITHUB_STEP_SUMMARY"
         echo "" >> "$GITHUB_STEP_SUMMARY"
@@ -626,17 +624,14 @@ EOF
         echo "$STATS"
         echo ""
         
-        # ✅ CRITICAL FIX: Robust parsing with normalized whitespace
         NORM="$(printf "%s" "$STATS" | sed 's/[[:space:]]\{1,\}/ /g')"
         
-        # Extract left numbers (current run stats) from each line
-        CACHEABLE=$(echo "$NORM" | awk -F'[ /]+' '/^Cacheable calls:/ {print $3+0}')
-        HITS=$(echo "$NORM" | awk -F'[ /]+' '/^ Hits:/ {print $3+0}')
-        DIRECT=$(echo "$NORM" | awk -F'[ /]+' '/^ Direct:/ {print $3+0}')
-        PREPROC=$(echo "$NORM" | awk -F'[ /]+' '/^ Preprocessed:/ {print $3+0}')
-        MISS=$(echo "$NORM" | awk -F'[ /]+' '/^ Misses:/ {print $3+0}')
+        CACHEABLE=$(echo "$NORM" | awk -F'[ /]+' '/^[[:space:]]*Cacheable calls:/ {print $3+0}')
+        HITS=$(echo "$NORM" | awk -F'[ /]+' '/^[[:space:]]*Hits:/ {print $3+0}')
+        DIRECT=$(echo "$NORM" | awk -F'[ /]+' '/^[[:space:]]*Direct:/ {print $3+0}')
+        PREPROC=$(echo "$NORM" | awk -F'[ /]+' '/^[[:space:]]*Preprocessed:/ {print $3+0}')
+        MISS=$(echo "$NORM" | awk -F'[ /]+' '/^[[:space:]]*Misses:/ {print $3+0}')
         
-        # Fallbacks if sub-lines weren't present
         [ -z "${DIRECT}" ] && DIRECT=0
         [ -z "${PREPROC}" ] && PREPROC=0
         [ -z "${HITS}" ] && HITS=$((DIRECT + PREPROC))
@@ -730,7 +725,7 @@ EOF
         set -euo pipefail
         echo "::group::Save Build Metadata"
         
-        CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
+        CONFIG_DIR="$GITHUB_WORKSPACE/${OP_MODEL}"
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
         
@@ -789,7 +784,7 @@ EOF
       run: |
         set -euo pipefail
         
-        KERNEL_PATH="$GITHUB_WORKSPACE/$CONFIG/kernel_platform"
+        KERNEL_PATH="$GITHUB_WORKSPACE/${OP_MODEL}/kernel_platform"
         COMMON="$KERNEL_PATH/common"
         OUT="$COMMON/out"
         IMG="$OUT/arch/arm64/boot/Image"
@@ -919,7 +914,7 @@ EOF
         
         echo "Searching for compiled zram.ko module..."
         
-        CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
+        CONFIG_DIR="$GITHUB_WORKSPACE/${OP_MODEL}"
         
         search_paths=(
           "$CONFIG_DIR/kernel_platform/common/out"
@@ -1105,7 +1100,7 @@ EOF
         set -euo pipefail
         echo "::group::Create kernel ZIP package"
         
-        CONFIG_DIR="$GITHUB_WORKSPACE/$CONFIG"
+        CONFIG_DIR="$GITHUB_WORKSPACE/${OP_MODEL}"
         IMAGE_PATH="$CONFIG_DIR/kernel_platform/common/out/arch/arm64/boot/Image"
         
         if [ ! -f "$IMAGE_PATH" ]; then
@@ -1204,15 +1199,5 @@ EOF
         fi
         
         if [ -n "${{ steps.ccache_stats.outputs.hit_rate }}" ]; then
-                    echo "- **ccache Hit Rate:** ${{ steps.ccache_stats.outputs.hit_rate }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **ccache Direct Rate:** ${{ steps.ccache_stats.outputs.direct_rate }}" >> $GITHUB_STEP_SUMMARY
-        fi
-        
-        if [ -n "${{ steps.collect_stats.outputs.warnings_count }}" ]; then
-          echo "- **Compiler Warnings:** ${{ steps.collect_stats.outputs.warnings_count }}" >> $GITHUB_STEP_SUMMARY
-        fi
-        
-        if [ -n "${{ steps.collect_stats.outputs.image_sha256 }}" ]; then
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Kernel Image SHA256:** \`${{ steps.collect_stats.outputs.image_sha256 }}\`" >> $GITHUB_STEP_SUMMARY
-        fi
+          echo "- **ccache Hit Rate:** ${{ steps.ccache_stats.outputs.hit_rate }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **ccache Direct Rate:** ${{ steps.ccache_stats.outputs.direct_rate }}" >> $GITHUB_STEP_
