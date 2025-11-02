@@ -155,6 +155,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 6  # ✅ RECOMMENDED: Limit concurrent builds
       matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
     steps:
       - name: 📥 Checkout repository
@@ -193,7 +194,6 @@ jobs:
             echo "  - Build time: ${{ steps.build.outputs.build_time }}s"
             echo "  - ZIP: ${{ steps.build.outputs.zip_name }}"
             
-            # ✅ FIXED: Safe size formatting with fallback
             if [ -n "${{ steps.build.outputs.zip_size }}" ]; then
               SIZE_BYTES="${{ steps.build.outputs.zip_size }}"
               if command -v numfmt >/dev/null 2>&1; then
@@ -245,7 +245,6 @@ jobs:
           | **Build Time** | ${{ steps.build.outputs.build_time }}s |
           EOF
             
-            # ✅ FIXED: Safe size formatting in summary
             if [ -n "${{ steps.build.outputs.zip_size }}" ]; then
               SIZE_BYTES="${{ steps.build.outputs.zip_size }}"
               if command -v numfmt >/dev/null 2>&1; then
