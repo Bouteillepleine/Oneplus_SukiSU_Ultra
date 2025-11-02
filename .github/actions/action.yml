@@ -126,6 +126,14 @@ runs:
           squashfs-tools xsltproc zip zlib1g-dev python-is-python3 \
           libtinfo5 libncurses5 jq
         
+        # Verify ccache installation
+        if ! command -v ccache >/dev/null 2>&1; then
+          echo "❌ ccache installation failed"
+          exit 1
+        fi
+        
+        ccache --version
+        
         echo "✅ Dependencies installed"
         echo "::endgroup::"
 
@@ -186,6 +194,8 @@ runs:
         echo "::endgroup::"
 
     - name: ⚙️ Set Cache Environment
+      id: set_cache_env
+      if: ${{ inputs.clean != 'true' }}
       shell: bash
       run: |
         set -euo pipefail
@@ -194,6 +204,12 @@ runs:
         CACHE_DIR="/mnt/ccache/${OP_MODEL}"
         sudo mkdir -p "$CACHE_DIR"
         sudo chown "$USER:$USER" "$CACHE_DIR"
+        
+        # Validate directory was created
+        if [ ! -d "$CACHE_DIR" ]; then
+          echo "❌ Failed to create CCACHE_DIR: $CACHE_DIR"
+          exit 1
+        fi
         
         echo "CCACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
         echo "CCACHE_MAXSIZE=30G" >> "$GITHUB_ENV"
@@ -210,8 +226,9 @@ runs:
         echo "::endgroup::"
 
     - name: 📦 Restore ccache
-      if: ${{ inputs.clean != 'true' }}
+      if: ${{ inputs.clean != 'true' && env.CCACHE_DIR != '' }}
       uses: actions/cache/restore@v4
+      continue-on-error: true
       with:
         path: ${{ env.CCACHE_DIR }}
         key: ccache-v3-${{ runner.os }}-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}
@@ -222,11 +239,18 @@ runs:
           ccache-v3-${{ runner.os }}-
 
     - name: 🔧 Configure ccache
-      if: ${{ inputs.clean != 'true' }}
+      if: ${{ inputs.clean != 'true' && env.CCACHE_DIR != '' }}
       shell: bash
       run: |
         set -euo pipefail
         echo "::group::Configure ccache"
+        
+        # Guard: Check if ccache is installed
+        if ! command -v ccache >/dev/null 2>&1; then
+          echo "⚠️ ccache not installed, skipping configuration"
+          echo "::endgroup::"
+          exit 0
+        fi
         
         export CCACHE_DIR="${CCACHE_DIR:-$HOME/.ccache}"
         export CCACHE_MAXSIZE="${CCACHE_MAXSIZE:-30G}"
@@ -416,9 +440,9 @@ runs:
           
           for tool in clang clang++ gcc g++ cc c++; do
             cat > "$COMMON/ccache-bin/$tool" << EOF
-          #!/bin/bash
-          exec $CCACHE_BIN ${CLANG_PATH}/bin/$tool "\$@"
-          EOF
+        #!/bin/bash
+        exec $CCACHE_BIN ${CLANG_PATH}/bin/$tool "\$@"
+        EOF
             chmod +x "$COMMON/ccache-bin/$tool"
           done
           
@@ -577,7 +601,7 @@ runs:
         echo "============================================"
         echo "::endgroup::"
 
-    - name: Check Disk Space (Post-Build)
+    - name: 🔍 Check Disk Space (Post-Build)
       if: always()
       shell: bash
       run: |
@@ -588,7 +612,7 @@ runs:
         du -h --max-depth=2 "$GITHUB_WORKSPACE" 2>/dev/null | sort -rh | head -n 20 || true
         echo "::endgroup::"
 
-    - name: On failure - Summarize last error
+    - name: 🔴 On failure - Summarize last error
       if: ${{ failure() }}
       shell: bash
       run: |
@@ -614,15 +638,69 @@ runs:
       if: ${{ always() && inputs.clean != 'true' }}
       shell: bash
       run: |
-        set -euo pipefail
+        set +e  # Don't fail on errors in diagnostic step
         echo "::group::ccache final statistics"
         
-        export CCACHE_DIR="${{ env.CCACHE_DIR }}"
+        # Guard 1: Check if ccache is installed
+        if ! command -v ccache >/dev/null 2>&1; then
+          echo "⚠️ ccache not installed or not in PATH, skipping statistics"
+          echo "hit_rate=0%" >> "$GITHUB_OUTPUT"
+          echo "direct_rate=0%" >> "$GITHUB_OUTPUT"
+          echo "ccache_hits=0" >> "$GITHUB_OUTPUT"
+          echo "ccache_misses=0" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit 0
+        fi
         
-        STATS="$(ccache -s)"
+        # Guard 2: Check if CCACHE_DIR is set and exists
+        CCACHE_DIR="${CCACHE_DIR:-}"
+        if [ -z "${CCACHE_DIR}" ]; then
+          echo "⚠️ CCACHE_DIR not set (build likely failed before cache setup)"
+          echo "hit_rate=0%" >> "$GITHUB_OUTPUT"
+          echo "direct_rate=0%" >> "$GITHUB_OUTPUT"
+          echo "ccache_hits=0" >> "$GITHUB_OUTPUT"
+          echo "ccache_misses=0" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit 0
+        fi
+        
+        if [ ! -d "${CCACHE_DIR}" ]; then
+          echo "⚠️ CCACHE_DIR does not exist: ${CCACHE_DIR}"
+          echo "hit_rate=0%" >> "$GITHUB_OUTPUT"
+          echo "direct_rate=0%" >> "$GITHUB_OUTPUT"
+          echo "ccache_hits=0" >> "$GITHUB_OUTPUT"
+          echo "ccache_misses=0" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit 0
+        fi
+        
+        export CCACHE_DIR
+        
+        # Guard 3: Check if ccache stats command works
+        if ! STATS="$(ccache -s 2>/dev/null)"; then
+          echo "⚠️ Failed to retrieve ccache statistics"
+          echo "hit_rate=0%" >> "$GITHUB_OUTPUT"
+          echo "direct_rate=0%" >> "$GITHUB_OUTPUT"
+          echo "ccache_hits=0" >> "$GITHUB_OUTPUT"
+          echo "ccache_misses=0" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit 0
+        fi
+        
+        if [ -z "$STATS" ]; then
+          echo "⚠️ ccache statistics empty"
+          echo "hit_rate=0%" >> "$GITHUB_OUTPUT"
+          echo "direct_rate=0%" >> "$GITHUB_OUTPUT"
+          echo "ccache_hits=0" >> "$GITHUB_OUTPUT"
+          echo "ccache_misses=0" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit 0
+        fi
+        
         echo "$STATS"
         echo ""
         
+        # Parse statistics
         NORM="$(printf "%s" "$STATS" | sed 's/[[:space:]]\{1,\}/ /g')"
         
         CACHEABLE=$(echo "$NORM" | awk -F'[ /]+' '/^[[:space:]]*Cacheable calls:/ {print $3+0}')
@@ -631,10 +709,10 @@ runs:
         PREPROC=$(echo "$NORM" | awk -F'[ /]+' '/^[[:space:]]*Preprocessed:/ {print $3+0}')
         MISS=$(echo "$NORM" | awk -F'[ /]+' '/^[[:space:]]*Misses:/ {print $3+0}')
         
+        # Normalize values
         [ -z "${DIRECT}" ] && DIRECT=0
         [ -z "${PREPROC}" ] && PREPROC=0
         [ -z "${HITS}" ] && HITS=$((DIRECT + PREPROC))
-        
         [ -z "${CACHEABLE}" ] && CACHEABLE=0
         [ -z "${MISS}" ] && MISS=0
         
@@ -684,40 +762,45 @@ runs:
         
         echo "::endgroup::"
         
-        echo "## 📊 ccache Statistics" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo '```' >> $GITHUB_STEP_SUMMARY
-        echo "$STATS" >> $GITHUB_STEP_SUMMARY
-        echo '```' >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        
-        if [ "${CACHEABLE}" -gt 0 ] && [ "${HITS}" -gt 0 ]; then
-          echo "### Cache Performance" >> $GITHUB_STEP_SUMMARY
-          echo "- **Hit Rate:** ${HIT_RATE}%" >> $GITHUB_STEP_SUMMARY
-          echo "- **Direct Hit Rate:** ${DIRECT_RATE}%" >> $GITHUB_STEP_SUMMARY
-          echo "- **Total Hits:** $HITS" >> $GITHUB_STEP_SUMMARY
-          echo "- **Misses:** $MISS" >> $GITHUB_STEP_SUMMARY
-          echo "- **Cacheable Calls:** $CACHEABLE" >> $GITHUB_STEP_SUMMARY
-          echo "- **Cache Size:** $CACHE_SIZE" >> $GITHUB_STEP_SUMMARY
-        fi
+        # Generate summary
+        {
+          echo "## 📊 ccache Statistics"
+          echo ""
+          echo '```'
+          echo "$STATS"
+          echo '```'
+          echo ""
+          
+          if [ "${CACHEABLE}" -gt 0 ] && [ "${HITS}" -gt 0 ]; then
+            echo "### Cache Performance"
+            echo "- **Hit Rate:** ${HIT_RATE}%"
+            echo "- **Direct Hit Rate:** ${DIRECT_RATE}%"
+            echo "- **Total Hits:** $HITS"
+            echo "- **Misses:** $MISS"
+            echo "- **Cacheable Calls:** $CACHEABLE"
+            echo "- **Cache Size:** $CACHE_SIZE"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
 
-    - name: Save ccache (Success)
-      if: ${{ success() && inputs.clean != 'true' }}
+    - name: 💾 Save ccache (Success)
+      if: ${{ success() && inputs.clean != 'true' && env.CCACHE_DIR != '' }}
       uses: actions/cache/save@v4
       continue-on-error: true
       with:
         path: ${{ env.CCACHE_DIR }}
         key: ccache-v3-${{ runner.os }}-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}
+        enableCrossOsArchive: false
 
-    - name: Save ccache (Partial - On Failure)
-      if: ${{ failure() && inputs.clean != 'true' }}
+    - name: 💾 Save ccache (Partial - On Failure)
+      if: ${{ failure() && inputs.clean != 'true' && env.CCACHE_DIR != '' }}
       uses: actions/cache/save@v4
       continue-on-error: true
       with:
         path: ${{ env.CCACHE_DIR }}
         key: ccache-v3-${{ runner.os }}-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-partial-${{ github.run_id }}-${{ env.OP_MODEL }}
+        enableCrossOsArchive: false
         
-    - name: Save Build Metadata
+    - name: 💾 Save Build Metadata
       id: save_metadata
       shell: bash
       run: |
@@ -777,7 +860,7 @@ runs:
         
         echo "::endgroup::"
 
-    - name: Collect Build Stats / Validate Image
+    - name: ✅ Collect Build Stats / Validate Image
       id: collect_stats
       shell: bash
       run: |
@@ -826,7 +909,7 @@ runs:
         echo "   - SHA256: $IMG_SHA256"
         echo "   - Build time: ${BUILD_TIME}s"
 
-    - name: Download and Package ZRAM Module
+    - name: 📦 Download and Package ZRAM Module
       if: ${{ inputs.enable_zram == 'true' }}
       id: zram_find
       shell: bash
@@ -1016,7 +1099,7 @@ runs:
         
         echo "::endgroup::"    
 
-    - name: Download SUSFS Module from CI
+    - name: 📥 Download SUSFS Module from CI
       shell: bash
       continue-on-error: true
       env:
@@ -1089,7 +1172,7 @@ runs:
         
         echo "::endgroup::"
 
-    - name: Create kernel ZIP package
+    - name: 📦 Create kernel ZIP package
       id: create_zip
       shell: bash
       env:
@@ -1148,7 +1231,7 @@ runs:
         echo "   SHA256: $ZIP_SHA256"
         echo "::endgroup::"
 
-    - name: Generate Build Summary
+    - name: 📋 Generate Build Summary
       if: always()
       shell: bash
       run: |
