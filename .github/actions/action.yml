@@ -1126,7 +1126,7 @@ runs:
         fi
         
         # ✅ CRITICAL: Deterministic path mapping (NOT ignored by ccache)
-        WORKSPACE="${{ github.workspace }}"
+        WORKSPACE="${GITHUB_WORKSPACE}"  # 
         MAP="-fdebug-prefix-map=${WORKSPACE}=."
         MPMAP="-fmacro-prefix-map=${WORKSPACE}=."
         FPMAP="-ffile-prefix-map=${WORKSPACE}=."
@@ -1209,7 +1209,7 @@ runs:
         echo "Optimization: ${{ inputs.optimize_level }}"
         echo "KCFLAGS: ${KCFLAGS:0:150}..."
         echo "Timestamp: $KBUILD_BUILD_TIMESTAMP"
-        echo "Workspace: $WORKSPACE"
+        echo "Workspace: $WORKSPACE"  
         
         if [ "${{ inputs.clean }}" != "true" ]; then
           echo "ccache: ENABLED"
