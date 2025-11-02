@@ -1339,8 +1339,8 @@ runs:
         echo '```' >> "$GITHUB_STEP_SUMMARY"
         echo "::endgroup::"
 
-    - name: ccache Post-Build Statistics
-      id: ccache_stats
+    - name: 📊 ccache Post-Build Statistics
+      id: ccache_stats  # ✅ ADD THIS ID
       if: ${{ always() && inputs.clean != 'true' }}
       shell: bash
       run: |
@@ -1391,6 +1391,7 @@ runs:
           echo "  Overall hit rate: ${HIT_RATE}%"
           echo "  Direct hit rate: ${DIRECT_RATE}%"
           
+          # ✅ CRITICAL: Export to outputs
           echo "hit_rate=${HIT_RATE}%" >> "$GITHUB_OUTPUT"
           echo "direct_rate=${DIRECT_RATE}%" >> "$GITHUB_OUTPUT"
           
