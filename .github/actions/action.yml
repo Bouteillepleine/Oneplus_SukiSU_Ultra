@@ -1,4 +1,4 @@
-name: 'Build OnePlus Kernel with SukiSU Ultra (ccache optimized)'
+name: 'Build OnePlus Kernel with SukiSU Ultra'
 
 inputs:
   op_config_json:
