@@ -1340,7 +1340,7 @@ runs:
         echo "::endgroup::"
 
     - name: 📊 ccache Post-Build Statistics
-      id: ccache_stats  # ✅ ADD THIS ID
+      id: ccache_stats
       if: ${{ always() && inputs.clean != 'true' }}
       shell: bash
       run: |
@@ -1349,40 +1349,34 @@ runs:
         
         export CCACHE_DIR="${{ env.CCACHE_DIR }}"
         
-        # ✅ Try JSON format first (ccache 4.8+)
-        if ccache --print-stats --format=json >/dev/null 2>&1; then
-          echo "Using JSON stats format for accuracy"
-          STATS_JSON="$(ccache --print-stats --format=json)"
-          echo "$STATS_JSON" | jq '.' 2>/dev/null || echo "$STATS_JSON"
-          
-          # Parse JSON stats
-          CACHEABLE=$(echo "$STATS_JSON" | jq -r '.stats.cacheable_calls // 0' 2>/dev/null || echo "0")
-          DIRECT=$(echo "$STATS_JSON" | jq -r '.stats.direct_hits // 0' 2>/dev/null || echo "0")
-          PREPROC=$(echo "$STATS_JSON" | jq -r '.stats.preprocessed_hits // 0' 2>/dev/null || echo "0")
-          MISS=$(echo "$STATS_JSON" | jq -r '.stats.cache_miss // 0' 2>/dev/null || echo "0")
-          HITS=$((DIRECT + PREPROC))
-        else
-          echo "Using text stats format"
-          STATS="$(ccache -s)"
-          echo "$STATS"
-          
-          # Parse text stats
-          CACHEABLE=$(echo "$STATS" | awk -F': *' '/Cacheable calls/ {gsub(/ /,"",$2); print $2+0}')
-          DIRECT=$(echo "$STATS" | awk -F': *' '/Direct cache hit/ {gsub(/ /,"",$2); print $2+0}')
-          PREPROC=$(echo "$STATS" | awk -F': *' '/Preprocessed cache hit/ {gsub(/ /,"",$2); print $2+0}')
-          MISS=$(echo "$STATS" | awk -F': *' '/Cache miss/ {gsub(/ /,"",$2); print $2+0}')
-          HITS=$((DIRECT + PREPROC))
-        fi
-        
+        # Get full stats output
+        STATS="$(ccache -s)"
+        echo "$STATS"
         echo ""
-        echo "Cache effectiveness analysis:"
-        echo "  Cacheable calls: ${CACHEABLE:-0}"
-        echo "  Direct hits: ${DIRECT:-0}"
-        echo "  Preprocessed hits: ${PREPROC:-0}"
-        echo "  Total hits: ${HITS:-0}"
-        echo "  Misses: ${MISS:-0}"
         
-        if [ "${CACHEABLE:-0}" -gt 0 ]; then
+        # ✅ FIXED: Parse the actual ccache output format
+        # Extract from lines like "  Hits:            3598 /  6874 (52.34%)"
+        CACHEABLE=$(echo "$STATS" | grep -E "Cacheable calls:" | grep -oE "[0-9]+ / [0-9]+" | awk '{print $3}')
+        HITS=$(echo "$STATS" | grep -E "^\s+Hits:" | grep -oE "[0-9]+ / [0-9]+" | awk '{print $1}')
+        DIRECT=$(echo "$STATS" | grep -E "^\s+Direct:" | grep -oE "[0-9]+ / [0-9]+" | awk '{print $1}')
+        PREPROC=$(echo "$STATS" | grep -E "^\s+Preprocessed:" | grep -oE "[0-9]+ / [0-9]+" | awk '{print $1}')
+        MISS=$(echo "$STATS" | grep -E "^\s+Misses:" | grep -oE "[0-9]+ / [0-9]+" | awk '{print $1}')
+        
+        # Fallback to 0 if parsing fails
+        CACHEABLE="${CACHEABLE:-0}"
+        HITS="${HITS:-0}"
+        DIRECT="${DIRECT:-0}"
+        PREPROC="${PREPROC:-0}"
+        MISS="${MISS:-0}"
+        
+        echo "Cache effectiveness analysis:"
+        echo "  Cacheable calls: ${CACHEABLE}"
+        echo "  Total hits: ${HITS}"
+        echo "  Direct hits: ${DIRECT}"
+        echo "  Preprocessed hits: ${PREPROC}"
+        echo "  Misses: ${MISS}"
+        
+        if [ "${CACHEABLE}" -gt 0 ] && [ "${HITS}" -gt 0 ]; then
           HIT_RATE=$(awk -v h="$HITS" -v c="$CACHEABLE" 'BEGIN{printf "%.1f", (h/c)*100}')
           DIRECT_RATE=$(awk -v d="$DIRECT" -v c="$CACHEABLE" 'BEGIN{printf "%.1f", (d/c)*100}')
           
@@ -1391,9 +1385,11 @@ runs:
           echo "  Overall hit rate: ${HIT_RATE}%"
           echo "  Direct hit rate: ${DIRECT_RATE}%"
           
-          # ✅ CRITICAL: Export to outputs
+          # ✅ Export to outputs
           echo "hit_rate=${HIT_RATE}%" >> "$GITHUB_OUTPUT"
           echo "direct_rate=${DIRECT_RATE}%" >> "$GITHUB_OUTPUT"
+          echo "ccache_hits=${HITS}" >> "$GITHUB_OUTPUT"
+          echo "ccache_misses=${MISS}" >> "$GITHUB_OUTPUT"
           
           if (( $(echo "$HIT_RATE > 90" | bc -l 2>/dev/null || echo "0") )); then
             echo "  Status: ⭐⭐⭐⭐⭐ Excellent"
@@ -1407,9 +1403,11 @@ runs:
             echo "  Status: ⭐ Poor (expected on first build)"
           fi
         else
-          echo "⚠️ No cacheable calls detected"
+          echo "⚠️ No cacheable calls or hits detected"
           echo "hit_rate=0%" >> "$GITHUB_OUTPUT"
           echo "direct_rate=0%" >> "$GITHUB_OUTPUT"
+          echo "ccache_hits=0" >> "$GITHUB_OUTPUT"
+          echo "ccache_misses=${MISS}" >> "$GITHUB_OUTPUT"
         fi
         
         CACHE_SIZE=$(du -sh "$CCACHE_DIR" 2>/dev/null | cut -f1 || echo "unknown")
@@ -1422,23 +1420,24 @@ runs:
         echo "## 📊 ccache Statistics" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo '```' >> $GITHUB_STEP_SUMMARY
-        ccache -s >> $GITHUB_STEP_SUMMARY
+        echo "$STATS" >> $GITHUB_STEP_SUMMARY
         echo '```' >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        if [ "${CACHEABLE:-0}" -gt 0 ]; then
+        if [ "${CACHEABLE}" -gt 0 ] && [ "${HITS}" -gt 0 ]; then
           echo "### Cache Performance" >> $GITHUB_STEP_SUMMARY
           echo "- **Hit Rate:** ${HIT_RATE}%" >> $GITHUB_STEP_SUMMARY
           echo "- **Direct Hit Rate:** ${DIRECT_RATE}%" >> $GITHUB_STEP_SUMMARY
           echo "- **Total Hits:** $HITS" >> $GITHUB_STEP_SUMMARY
+          echo "- **Misses:** $MISS" >> $GITHUB_STEP_SUMMARY
           echo "- **Cacheable Calls:** $CACHEABLE" >> $GITHUB_STEP_SUMMARY
           echo "- **Cache Size:** $CACHE_SIZE" >> $GITHUB_STEP_SUMMARY
-          echo "- **Scope:** Shared across all matrix jobs" >> $GITHUB_STEP_SUMMARY
         fi
 
     - name: Save ccache (Success)
       if: ${{ success() && inputs.clean != 'true' }}
       uses: actions/cache/save@v4
+      continue-on-error: true
       with:
         path: ${{ env.CCACHE_DIR }}
         key: ccache-v2-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}
@@ -1985,4 +1984,4 @@ runs:
         echo "- Branch: ${OP_BRANCH}" >> $GITHUB_STEP_SUMMARY
         echo "- Manifest: ${OP_MANIFEST}" >> $GITHUB_STEP_SUMMARY
         echo "- KSU Meta: ${{ inputs.ksu_meta }}" >> $GITHUB_STEP_SUMMARY
-
+ 
