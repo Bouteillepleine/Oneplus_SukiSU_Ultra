@@ -84,6 +84,7 @@ runs:
         branch="$OP_BRANCH"
         manifest="$OP_MANIFEST"
         optimize='${{ inputs.optimize_level }}'
+        hook='${{ inputs.hook }}'
 
         [[ -n "$model" ]] || { echo "::error::Input 'model' cannot be empty"; exit 1; }
         [[ -n "$soc" ]] || { echo "::error::Input 'soc' cannot be empty"; exit 1; }
@@ -95,7 +96,13 @@ runs:
         fi    
         if ! [[ "$branch" =~ ^[A-Za-z0-9._/-]+$ ]]; then
           echo "::error::Input 'branch' contains invalid characters"; exit 1
-        fi    
+        fi
+        
+        # Validate hook type
+        if ! [[ "$hook" =~ ^(kprobe|manual|tracepoint)$ ]]; then
+          echo "::error::Invalid hook type: $hook (must be kprobe, manual, or tracepoint)"; exit 1
+        fi
+        
         if [[ "$manifest" == http*://* ]]; then
           if ! [[ "$manifest" =~ ^https:// ]]; then
             echo "::error::Manifest URL must be HTTPS"; exit 1
@@ -183,7 +190,8 @@ runs:
         if [[ "$OP_MANIFEST" == https://* ]]; then
           mkdir -p .repo/manifests
           curl --fail --show-error --location --proto '=https' "$OP_MANIFEST" -o .repo/manifests/temp_manifest.xml
-          "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git -b oneplus/sm8650 -m temp_manifest.xml --repo-rev=v2.16 --depth=1 --no-clone-bundle --no-tags
+          # ✅ FIXED: Use $OP_BRANCH instead of hardcoded sm8650
+          "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git -b "$OP_BRANCH" -m temp_manifest.xml --repo-rev=v2.16 --depth=1 --no-clone-bundle --no-tags
         else
           "$REPO" init -u https://github.com/OnePlusOSS/kernel_manifest.git -b "$OP_BRANCH" -m "$OP_MANIFEST" --repo-rev=v2.16 --depth=1 --no-clone-bundle --no-tags
         fi
@@ -207,10 +215,31 @@ runs:
       shell: bash
       run: |
         echo "::group::Disk Space Report"
+        
+        echo "=== Overall Disk Usage ==="
+        # ✅ FIXED: Show full df output instead of filtered
         df -h
+        
         echo ""
-        echo "Largest directories:"
+        echo "=== Workspace Usage ==="
         du -sh "$GITHUB_WORKSPACE"/* 2>/dev/null | sort -rh | head -n 10 || true
+        
+        echo ""
+        echo "=== ccache Usage ==="
+        if [ -d "${{ env.CCACHE_DIR }}" ]; then
+          du -sh "${{ env.CCACHE_DIR }}" 2>/dev/null || echo "ccache dir not accessible"
+        fi
+        
+        echo ""
+        echo "=== Temporary Files ==="
+        du -sh /tmp 2>/dev/null || true
+        
+        # Warn if low on space
+        AVAILABLE=$(df / | awk 'NR==2 {print $4}')
+        if [ "$AVAILABLE" -lt 5242880 ]; then  # Less than 5GB
+          echo "::warning::Low disk space: $(numfmt --to=iec-i --suffix=B $((AVAILABLE * 1024)))"
+        fi
+        
         echo "::endgroup::"
 
     - name: Get Kernel Version Info
@@ -316,13 +345,15 @@ runs:
         echo "Full Clang version: $CLANG_FULL_VERSION"
         echo "::endgroup::"
 
+    # 🎯 OPTIMIZED: Better cache key strategy
     - name: Restore ccache
       if: ${{ inputs.clean != 'true' }}
       uses: actions/cache@v4
       id: ccache-restore
       with:
-        path: ${{ env.CCACHE_DIR }}        
-        key: ccache-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ env.CCACHE_DIR }}
+        # ✅ OPTIMIZED: Stable key without SHA for better reuse
+        key: ccache-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}
         restore-keys: |
           ccache-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}-
           ccache-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-
@@ -342,7 +373,8 @@ runs:
         for compiler in clang clang++ gcc g++ cc c++; do
           if [ -f "$CLANG_DIR/$compiler" ] && [ ! -L "$CLANG_DIR/$compiler" ]; then
             mv "$CLANG_DIR/$compiler" "$CLANG_DIR/${compiler}.real"
-            ln -sf "$(which ccache)" "$CLANG_DIR/$compiler"
+            # ✅ FIXED: Use command -v instead of which
+            ln -sf "$(command -v ccache)" "$CLANG_DIR/$compiler"
             echo "✅ $compiler → ccache"
           fi
         done
@@ -355,7 +387,8 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        export CCACHE_DIR="/home/runner/.ccache"
+        # ✅ FIXED: Use env variable instead of hardcoded path
+        export CCACHE_DIR="${CCACHE_DIR:-$HOME/.ccache}"
         export CCACHE_MAXSIZE="20G"
         
         export CCACHE_COMPILERCHECK="content"
@@ -366,12 +399,11 @@ runs:
         
         mkdir -p "$CCACHE_DIR"
         ccache -M "$CCACHE_MAXSIZE"
-        ccache -o compression=true
-        ccache -o compression_level=6
-        ccache -o direct_mode=true
-        ccache -o hash_dir=false
-        # ccache -o cpp2=true  ← REMOVED (obsolete option)
-        ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale,random_seed
+        ccache -o compression=true 2>/dev/null || true
+        ccache -o compression_level=6 2>/dev/null || true
+        ccache -o direct_mode=true 2>/dev/null || true
+        ccache -o hash_dir=false 2>/dev/null || true
+        ccache -o sloppiness=file_macro,time_macros,include_file_mtime,include_file_ctime,pch_defines,system_headers,locale,random_seed 2>/dev/null || true
         
         {
           echo "CCACHE_COMPILERCHECK=content"
@@ -1102,9 +1134,11 @@ runs:
           echo "🚀 Normal build mode - ccache enabled"
         fi
         
+        # ✅ ADDED: Better path mapping for ccache stability
         MAP="-fdebug-prefix-map=${{ github.workspace }}=."
-        export KCFLAGS="${KCFLAGS:-} $MAP -no-canonical-prefixes"
-        export KCPPFLAGS="${KCPPFLAGS:-} $MAP"
+        MAP2="-fmacro-prefix-map=${{ github.workspace }}=."
+        export KCFLAGS="${KCFLAGS:-} $MAP $MAP2 -no-canonical-prefixes"
+        export KCPPFLAGS="${KCPPFLAGS:-} $MAP $MAP2"
         
         export LLVM=1 LLVM_IAS=1
         export ARCH=arm64 SUBARCH=arm64
@@ -1208,6 +1242,7 @@ runs:
         
         IMG_SIZE=$(stat -c%s "$IMG")
         
+        # ✅ FIXED: Removed malformed echo and duplication
         echo "============================================"
         echo "✅ Build Completed Successfully"
         echo "============================================"
@@ -1247,7 +1282,6 @@ runs:
         } >> "$GITHUB_STEP_SUMMARY"
         
         if [ -f "$COMMON/build.log" ]; then
-          # Categorize errors
           FATAL_ERRORS=$(grep -c "fatal error:" "$COMMON/build.log" 2>/dev/null || echo "0")
           UNDEFINED_REFS=$(grep -c "undefined reference" "$COMMON/build.log" 2>/dev/null || echo "0")
           LINK_ERRORS=$(grep -c "ld.lld:" "$COMMON/build.log" 2>/dev/null || echo "0")
@@ -1262,7 +1296,6 @@ runs:
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
           
-          # Show last error context
           LAST_ERROR_LINE=$(grep -n "error:" "$COMMON/build.log" 2>/dev/null | tail -n1 | cut -d: -f1)
           
           if [ -n "$LAST_ERROR_LINE" ]; then
@@ -1278,7 +1311,6 @@ runs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
           
-          # Show unique error patterns
           {
             echo "### 🎯 Unique Error Patterns"
             echo '```'
@@ -1293,6 +1325,7 @@ runs:
         
         echo "::endgroup::"
 
+    # 🛡️ IMPROVED: Better error handling for ccache stats
     - name: ccache Statistics
       id: ccache_stats
       if: ${{ always() && inputs.clean != 'true' }}
@@ -1303,13 +1336,26 @@ runs:
         
         export CCACHE_DIR="${{ env.CCACHE_DIR }}"
         
-        STATS="$(ccache -s)"
+        if ! STATS="$(ccache -s 2>&1)"; then
+          echo "⚠️ ccache stats unavailable"
+          echo "hit_rate=N/A" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit 0
+        fi
+        
         echo "$STATS"
         
-        CACHEABLE=$(echo "$STATS" | awk '/Cacheable calls/ {print $3+0}')
-        DIRECT_HIT=$(echo "$STATS" | awk '/Direct cache hit/ {print $4+0}')
-        PREPROCESSED_HIT=$(echo "$STATS" | awk '/Preprocessed cache hit/ {print $4+0}')
-        CACHE_MISS=$(echo "$STATS" | awk '/Cache miss/ {print $3+0}')
+        # Safe numeric extraction with defaults
+        CACHEABLE=$(echo "$STATS" | awk '/Cacheable calls/ {print $3+0; exit}')
+        DIRECT_HIT=$(echo "$STATS" | awk '/Direct cache hit/ {print $4+0; exit}')
+        PREPROCESSED_HIT=$(echo "$STATS" | awk '/Preprocessed cache hit/ {print $4+0; exit}')
+        CACHE_MISS=$(echo "$STATS" | awk '/Cache miss/ {print $3+0; exit}')
+        
+        # Default to 0 if empty
+        CACHEABLE=${CACHEABLE:-0}
+        DIRECT_HIT=${DIRECT_HIT:-0}
+        PREPROCESSED_HIT=${PREPROCESSED_HIT:-0}
+        CACHE_MISS=${CACHE_MISS:-0}
         
         TOTAL_HITS=$((DIRECT_HIT + PREPROCESSED_HIT))
         
@@ -1319,23 +1365,25 @@ runs:
         echo "Total hits: $TOTAL_HITS"
         echo "Cache misses: $CACHE_MISS"
         
-        if [ "${CACHEABLE:-0}" -gt 0 ]; then
+        if [ "$CACHEABLE" -gt 0 ]; then
           HIT_RATE=$(awk -v h="$TOTAL_HITS" -v c="$CACHEABLE" 'BEGIN{printf "%.1f", (h/c)*100}')
           echo "hit_rate=${HIT_RATE}%" >> "$GITHUB_OUTPUT"
           echo "✅ Cache hit rate: ${HIT_RATE}%"
         else
-          echo "hit_rate=0%" >> "$GITHUB_OUTPUT"
+          echo "hit_rate=0.0%" >> "$GITHUB_OUTPUT"
           echo "⚠️ No cacheable calls detected"
         fi
         
         echo "::endgroup::"
-
+ 
     - name: Save ccache
       if: ${{ always() && inputs.clean != 'true' && env.CCACHE_CACHEABLE_CALLS != '0' }}
       uses: actions/cache/save@v4
       with:
         path: ${{ env.CCACHE_DIR }}
-        key: ccache-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}-${{ github.run_id }}-${{ github.run_attempt }}
+        # ✅ OPTIMIZED: Save with SHA for unique tracking
+        key: ccache-${{ env.ANDROID_VER }}-${{ env.KERNEL_VER }}-${{ env.CLANG_VERSION_SHORT }}-${{ env.OP_MODEL }}-${{ github.sha }}
+
 
     - name: Save Build Metadata
       id: save_metadata
@@ -1381,7 +1429,6 @@ runs:
         # Safe warnings count - no stdout pollution
         WARNINGS=0
         if [ -f "$COMMON/build.log" ]; then
-          # Capture in variable first, then validate
           WARN_RAW=$(grep -ciE '\bwarning:' "$COMMON/build.log" 2>/dev/null || true)
           if [[ "$WARN_RAW" =~ ^[0-9]+$ ]]; then
             WARNINGS="$WARN_RAW"
@@ -1410,6 +1457,47 @@ runs:
         IMG_SIZE_MB=$((IMG_SIZE / 1024 / 1024))
         echo "image_size_mb=$IMG_SIZE_MB" >> "$GITHUB_OUTPUT"
         echo "Image size: ${IMG_SIZE_MB}MB"
+        
+        echo "::endgroup::"
+
+    # 🔄 NEW: Restore original compilers
+    - name: Restore Original Compilers
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "::group::Restore original compilers"
+        
+        CLANG_DIR="${CLANG_BIN_PATH:-}"
+        
+        if [ -z "$CLANG_DIR" ]; then
+          echo "⚠️ CLANG_BIN_PATH not set, skipping restoration"
+          echo "::endgroup::"
+          exit 0
+        fi
+        
+        if [ ! -d "$CLANG_DIR" ]; then
+          echo "⚠️ Clang directory not found: $CLANG_DIR"
+          echo "::endgroup::"
+          exit 0
+        fi
+        
+        RESTORED=0
+        for compiler in clang clang++ gcc g++ cc c++; do
+          if [ -f "$CLANG_DIR/${compiler}.real" ]; then
+            rm -f "$CLANG_DIR/$compiler"
+            mv "$CLANG_DIR/${compiler}.real" "$CLANG_DIR/$compiler"
+            echo "✅ Restored $compiler"
+            RESTORED=$((RESTORED + 1))
+          fi
+        done
+        
+        if [ $RESTORED -gt 0 ]; then
+          echo ""
+          echo "✅ Restored $RESTORED compiler(s) to original state"
+        else
+          echo "ℹ️ No compilers needed restoration"
+        fi
         
         echo "::endgroup::"
 
@@ -1468,19 +1556,16 @@ runs:
         COMMON="$GITHUB_WORKSPACE/$CONFIG/kernel_platform/common"
         IMG="$COMMON/out/arch/arm64/boot/Image"
         
-        # Validate Image exists
         if [ ! -f "$IMG" ]; then
           echo "::error::Kernel Image not found: $IMG"
           exit 1
         fi
         
-        # Check image size
         IMG_SIZE=$(stat -c%s "$IMG")
         if [ "$IMG_SIZE" -lt 10000000 ]; then
           echo "::warning::Kernel Image seems too small: $(numfmt --to=iec-i --suffix=B $IMG_SIZE)"
         fi
         
-        # Validate AnyKernel3 directory
         if [ ! -d "$GITHUB_WORKSPACE/AnyKernel3" ]; then
           echo "::error::AnyKernel3 directory not found"
           exit 1
@@ -1489,7 +1574,6 @@ runs:
         echo "Copying kernel Image to AnyKernel3..."
         cp "$IMG" "$GITHUB_WORKSPACE/AnyKernel3/Image"
         
-        # Verify copy succeeded
         if ! cmp -s "$IMG" "$GITHUB_WORKSPACE/AnyKernel3/Image"; then
           echo "::error::Image copy verification failed"
           exit 1
@@ -1507,7 +1591,6 @@ runs:
         
         FEATURES="${FEATURES#_}"
         
-        # Validate required variables
         if [ -z "${OP_MODEL:-}" ]; then
           echo "::error::OP_MODEL not set"
           exit 1
@@ -1523,7 +1606,6 @@ runs:
           exit 1
         fi
         
-        # Build ZIP name
         if [ -n "$FEATURES" ]; then
           ZIP_NAME="AnyKernel3_${OP_MODEL}_${KERNEL_FULL_VER}_SukiSU_${SUKISUVER}_${FEATURES}.zip"
         else
@@ -1532,50 +1614,41 @@ runs:
         
         echo "Creating ZIP: $ZIP_NAME"
         
-        # Remove old ZIP if exists
         rm -f "$ZIP_NAME" 2>/dev/null || true
         
-        # Create ZIP
         if ! zip -r9 "$ZIP_NAME" ./* -x "*.git*" -x "$ZIP_NAME" -x "*.md" -x "LICENSE"; then
           echo "::error::Failed to create ZIP package"
           exit 1
         fi
         
-        # Validate ZIP was created
         if [ ! -f "$ZIP_NAME" ]; then
           echo "::error::ZIP file not created"
           exit 1
         fi
         
-        # Test ZIP integrity
         if ! unzip -t "$ZIP_NAME" >/dev/null 2>&1; then
           echo "::error::ZIP integrity check failed"
           exit 1
         fi
         
-        # Verify Image is in ZIP
         if ! unzip -l "$ZIP_NAME" | grep -q "Image$"; then
           echo "::error::Image not found in ZIP package"
           exit 1
         fi
         
-        # Move to artifacts
         ARTIFACTS_DIR="$GITHUB_WORKSPACE/$CONFIG/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
         mv "$ZIP_NAME" "$ARTIFACTS_DIR/"
         
-        # Calculate ZIP metadata
         ZIP_SIZE=$(stat -c%s "$ARTIFACTS_DIR/$ZIP_NAME")
         ZIP_SIZE_MB=$((ZIP_SIZE / 1024 / 1024))
         ZIP_SHA256=$(sha256sum "$ARTIFACTS_DIR/$ZIP_NAME" | awk '{print $1}')
         
-        # Set outputs
         echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
         echo "zip_size=$ZIP_SIZE" >> "$GITHUB_OUTPUT"
         echo "zip_size_mb=$ZIP_SIZE_MB" >> "$GITHUB_OUTPUT"
         echo "zip_sha256=$ZIP_SHA256" >> "$GITHUB_OUTPUT"
         
-        # Also set as env for other steps
         echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
         echo "ZIP_SIZE=$ZIP_SIZE" >> "$GITHUB_ENV"
         echo "ZIP_SIZE_MB=$ZIP_SIZE_MB" >> "$GITHUB_ENV"
@@ -1587,6 +1660,70 @@ runs:
         echo "   SHA256: $ZIP_SHA256"
         
         echo "::endgroup::"
+
+    # 📊 NEW: Enhanced build summary
+    - name: Build Summary
+      if: always()
+      shell: bash
+      run: |
+        {
+          echo "## 🎯 Build Summary"
+          echo ""
+          echo "### 📱 Device Configuration"
+          echo "| Property | Value |"
+          echo "|----------|-------|"
+          echo "| Device | ${OP_MODEL:-N/A} |"
+          echo "| SoC | ${OP_SOC:-N/A} |"
+          echo "| Kernel | ${KERNEL_FULL_VER:-N/A} |"
+          echo "| Android | ${ANDROID_VER:-N/A} |"
+          echo ""
+          echo "### 🔧 Build Options"
+          echo "| Option | Value |"
+          echo "|--------|-------|"
+          echo "| Hook | ${{ inputs.hook }} |"
+          echo "| Optimization | ${{ inputs.optimize_level }} |"
+          echo "| ZRAM | ${{ inputs.enable_zram }} |"
+          echo "| LSM (BBG) | ${{ inputs.lsm }} |"
+          echo "| Scheduler | ${{ inputs.sched }} |"
+          echo "| Clean Build | ${{ inputs.clean }} |"
+          echo ""
+          echo "### 📦 Versions"
+          echo "| Component | Version |"
+          echo "|-----------|---------|"
+          echo "| SukiSU | v${SUKISUVER:-N/A} |"
+          echo "| SUSFS | ${SUSVER:-N/A} |"
+          echo "| Clang | ${CLANG_VERSION_SHORT:-N/A} |"
+          echo ""
+          
+          if [ -n "${ZIP_NAME:-}" ]; then
+            echo "### 📦 Build Artifacts"
+            echo "| Property | Value |"
+            echo "|----------|-------|"
+            echo "| ZIP Name | \`${ZIP_NAME}\` |"
+            echo "| Size | ${ZIP_SIZE_MB:-N/A} MB |"
+            echo "| SHA256 | \`${ZIP_SHA256:-N/A}\` |"
+            echo ""
+          fi
+          
+          if [ "${{ inputs.clean }}" != "true" ] && [ -n "${{ steps.ccache_stats.outputs.hit_rate }}" ]; then
+            echo "### 📊 Cache Performance"
+            echo "| Metric | Value |"
+            echo "|--------|-------|"
+            echo "| Hit Rate | ${{ steps.ccache_stats.outputs.hit_rate }} |"
+            echo "| Build Time | ${BUILD_TIME:-N/A}s ($((${BUILD_TIME:-0} / 60))m $((${BUILD_TIME:-0} % 60))s) |"
+            echo ""
+          fi
+          
+          if [ -n "${{ steps.collect_stats.outputs.warnings_count }}" ]; then
+            WARN_COUNT="${{ steps.collect_stats.outputs.warnings_count }}"
+            if [ "$WARN_COUNT" -gt 0 ]; then
+              echo "### ⚠️ Build Warnings"
+              echo "Total warnings: $WARN_COUNT"
+              echo ""
+            fi
+          fi
+          
+        } >> "$GITHUB_STEP_SUMMARY"
     
     - name: Upload Build Artifacts Summary
       if: always()
