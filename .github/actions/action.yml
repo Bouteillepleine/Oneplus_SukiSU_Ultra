@@ -416,9 +416,9 @@ runs:
           
           for tool in clang clang++ gcc g++ cc c++; do
             cat > "$COMMON/ccache-bin/$tool" << EOF
-#!/bin/bash
-exec $CCACHE_BIN ${CLANG_PATH}/bin/$tool "\$@"
-EOF
+          #!/bin/bash
+          exec $CCACHE_BIN ${CLANG_PATH}/bin/$tool "\$@"
+          EOF
             chmod +x "$COMMON/ccache-bin/$tool"
           done
           
