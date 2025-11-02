@@ -154,25 +154,29 @@ runs:
         fi
         echo "REPO=$REPO" >> "$GITHUB_ENV"
 
-    - name: Create and Enable Swap
+    - name: Check System Resources
       shell: bash
       run: |
         set -euo pipefail
-        echo "::group::Configure swap"
-        
-        # Disable existing swap
-        sudo swapoff -a || true
-        
-        # Create 2GB swap (reduced from 3GB to save space)
-        sudo fallocate -l 2G /swapfile
-        sudo chmod 600 /swapfile
-        sudo mkswap /swapfile
-        sudo swapon /swapfile
-        
-        # Verify
-        echo "Swap configuration:"
+        echo "::group::System resources"
+        echo "📊 Available resources:"
+        echo ""
+        echo "RAM:"
         free -h
-        
+        echo ""
+        echo "Disk:"
+        df -h / | tail -n1
+        echo ""
+        echo "CPU:"
+        echo "  Cores: $(nproc --all)"
+        echo "  Model: $(lscpu | grep 'Model name' | cut -d: -f2 | xargs)"
+        echo ""
+        echo "ccache:"
+        if [ -d "${CCACHE_DIR:-$HOME/.ccache}" ]; then
+          du -sh "${CCACHE_DIR:-$HOME/.ccache}" 2>/dev/null || echo "  Not initialized"
+        else
+          echo "  Not initialized"
+        fi
         echo "::endgroup::"
 
     - name: Initialize and Sync Kernel Source
@@ -1093,36 +1097,7 @@ runs:
         mkdir -p out
         CUSTOM_LOCALVERSION="-${{ env.ANDROID_VER }}-OP-⚡UltraBolt⚡"
         echo "CUSTOM_LOCALVERSION=$CUSTOM_LOCALVERSION" >> "$GITHUB_ENV"
-        echo "Kernel branding: $CUSTOM_LOCALVERSION"
-
-    - name: Minimal Disk Cleanup
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::group::Essential cleanup only"
-        
-        echo "📊 Before cleanup:"
-        df -h
-        echo ""
-        
-        echo "🗑️ Removing large non-essential packages..."
-        # Remove big non-essential bundles (safe on GH-hosted runners)
-        sudo rm -rf /usr/share/dotnet || true
-        sudo rm -rf /usr/local/lib/android || true
-        sudo rm -rf /opt/hostedtoolcache/CodeQL || true
-        
-        # Clear Docker images if Docker is available
-        if command -v docker >/dev/null 2>&1; then
-          echo "🐳 Cleaning Docker..."
-          docker system prune -af --volumes 2>/dev/null || true
-        fi
-        
-        echo ""
-        echo "📊 After cleanup:"
-        df -h
-        echo ""
-        echo "✅ Cleanup complete"
-        echo "::endgroup::"
+        echo "Kernel branding: $CUSTOM_LOCALVERSION"    
 
     - name: Build Kernel
       shell: bash
