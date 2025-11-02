@@ -49,21 +49,30 @@ outputs:
   image_sha256:
     description: 'Kernel image SHA256'
     value: ${{ steps.collect_stats.outputs.image_sha256 }}
-  warnings_count:
-    description: 'Build warnings count'
-    value: ${{ steps.collect_stats.outputs.warnings_count }}
   zip_name:
     description: 'Created ZIP filename'
     value: ${{ steps.create_zip.outputs.zip_name }}
+  zip_sha256:
+    description: 'ZIP file SHA256'
+    value: ${{ steps.create_zip.outputs.zip_sha256 }}
+  zip_size:
+    description: 'ZIP file size in bytes'
+    value: ${{ steps.create_zip.outputs.zip_size }}
   build_time:
     description: 'Build time in seconds'
     value: ${{ steps.collect_stats.outputs.build_time }}
   ccache_hit_rate:
     description: 'ccache hit rate percentage'
     value: ${{ steps.ccache_stats.outputs.hit_rate }}
+  ccache_direct_rate:
+    description: 'ccache direct hit rate percentage'
+    value: ${{ steps.ccache_stats.outputs.direct_rate }}
+  warnings_count:
+    description: 'Build warnings count'
+    value: ${{ steps.collect_stats.outputs.warnings_count }}
 
 runs:
-  using: composite
+  using: 'composite'  
   steps:
     - name: Parse op_config_json
       shell: bash
@@ -1802,76 +1811,32 @@ runs:
         KERNEL_VER="${KERNEL_VERSION:-${KERNEL_FULL_VER:-unknown}}"
         SUKISU_VER="${SUKISU_VERSION:-${SUKISUVER:-unknown}}"
         
-        # Simple format: AnyKernel3_MODEL_KERNEL-VERSION_SukiSU_VERSION.zip
         ZIP_NAME="AnyKernel3_${OP_MODEL}_${KERNEL_VER}_SukiSU_${SUKISU_VER}.zip"
         
         ARTIFACTS_DIR="$CONFIG_DIR/artifacts"
         mkdir -p "$ARTIFACTS_DIR"
         
         echo "Creating flashable ZIP: $ZIP_NAME"
-        echo "Output directory: $ARTIFACTS_DIR"
         
-        # List files before zipping
-        echo ""
-        echo "Files to be included:"
-        ls -lh | grep -v "^d" | head -20
-        
-        # Check for SUSFS module
-        SUSFS_COUNT=$(find . -maxdepth 1 -name "ksu_module_susfs*.zip" -type f | wc -l)
-        if [ "$SUSFS_COUNT" -gt 0 ]; then
-          echo ""
-          echo "✅ Found SUSFS module(s):"
-          find . -maxdepth 1 -name "ksu_module_susfs*.zip" -type f -exec ls -lh {} \;
-        else
-          echo ""
-          echo "⚠️ No SUSFS module found in AnyKernel3 directory"
-        fi
-        
-        # Create ZIP - Include SUSFS module, exclude only the final ZIP
         if ! zip -r9 "$ZIP_NAME" ./* \
              -x "*.git*" \
              -x "$ZIP_NAME" \
              -x "README.md" 2>&1 | tee /tmp/zip.log; then
           echo "::error::Failed to create ZIP package"
-          cat /tmp/zip.log
           exit 1
-        fi
-        
-        if [ ! -f "$ZIP_NAME" ]; then
-          echo "::error::ZIP file not created: $ZIP_NAME"
-          ls -la
-          exit 1
-        fi
-        
-        # Verify SUSFS module is inside the ZIP
-        echo ""
-        echo "Verifying ZIP contents:"
-        if unzip -l "$ZIP_NAME" | grep -q "ksu_module_susfs"; then
-          echo "✅ SUSFS module is included in ZIP"
-          unzip -l "$ZIP_NAME" | grep "ksu_module_susfs"
-        else
-          echo "⚠️ WARNING: SUSFS module NOT found in ZIP!"
-          echo "ZIP contents:"
-          unzip -l "$ZIP_NAME" | head -30
         fi
         
         mv "$ZIP_NAME" "$ARTIFACTS_DIR/"
         
-        if [ ! -f "$ARTIFACTS_DIR/$ZIP_NAME" ]; then
-          echo "::error::ZIP file not found after move: $ARTIFACTS_DIR/$ZIP_NAME"
-          echo "Contents of artifacts directory:"
-          ls -la "$ARTIFACTS_DIR/"
-          exit 1
-        fi
-        
         ZIP_SIZE=$(stat -c%s "$ARTIFACTS_DIR/$ZIP_NAME")
         ZIP_SHA256=$(sha256sum "$ARTIFACTS_DIR/$ZIP_NAME" | awk '{print $1}')
         
-        # ✅ Write to BOTH $GITHUB_OUTPUT and $GITHUB_ENV
+        # ✅ CRITICAL: Output all three values
         echo "zip_name=$ZIP_NAME" >> "$GITHUB_OUTPUT"
         echo "zip_size=$ZIP_SIZE" >> "$GITHUB_OUTPUT"
         echo "zip_sha256=$ZIP_SHA256" >> "$GITHUB_OUTPUT"
         
+        # Also set env vars for summary
         echo "ZIP_NAME=$ZIP_NAME" >> "$GITHUB_ENV"
         echo "ZIP_SIZE=$ZIP_SIZE" >> "$GITHUB_ENV"
         echo "ZIP_SHA256=$ZIP_SHA256" >> "$GITHUB_ENV"
@@ -1881,7 +1846,6 @@ runs:
         echo "   Name: $ZIP_NAME"
         echo "   Size: $(numfmt --to=iec-i --suffix=B "$ZIP_SIZE")"
         echo "   SHA256: $ZIP_SHA256"
-        echo "   Location: $ARTIFACTS_DIR/$ZIP_NAME"
         echo "::endgroup::"
 
     - name: Generate Build Summary
