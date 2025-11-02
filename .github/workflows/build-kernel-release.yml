@@ -71,10 +71,6 @@ on:
         type: choice
         options: [O2, O3]
         default: O2
-      clean_build:
-        description: 'Clean build'
-        type: boolean
-        default: false
 
 jobs:
   setup:
@@ -146,7 +142,6 @@ jobs:
           - ZRAM: ${{ inputs.enable_zram }}
           - BBG LSM: ${{ inputs.lsm }}
           - Fengchi: ${{ inputs.sched }}
-          - Clean Build: ${{ inputs.clean_build }}
           - Create Release: ${{ inputs.make_release }}
           EOF
 
@@ -171,7 +166,6 @@ jobs:
           enable_zram: ${{ inputs.enable_zram }}
           sched: ${{ inputs.sched }}
           optimize_level: ${{ inputs.optimize_level }}
-          clean: ${{ inputs.clean_build }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 📊 Build statistics
@@ -202,10 +196,6 @@ jobs:
             
             echo "  - ZIP: ${{ steps.build.outputs.zip_name }}"
             echo "  - Size: $(numfmt --to=iec-i --suffix=B ${{ steps.build.outputs.zip_size }} 2>/dev/null || echo '${{ steps.build.outputs.zip_size }} bytes')"
-            
-            if [ "${{ inputs.clean_build }}" != "true" ]; then
-              echo "  - ccache hit rate: ${{ steps.build.outputs.ccache_hit_rate }}"
-            fi
             
             if [ -n "${{ steps.build.outputs.warnings_count }}" ]; then
               echo "  - Warnings: ${{ steps.build.outputs.warnings_count }}"
@@ -252,10 +242,6 @@ jobs:
           | **Build Time** | ${BUILD_TIME_DISPLAY} |
           | **ZIP Size** | $(numfmt --to=iec-i --suffix=B ${{ steps.build.outputs.zip_size }} 2>/dev/null || echo '${{ steps.build.outputs.zip_size }} bytes') |
           EOF
-            
-            if [ "${{ inputs.clean_build }}" != "true" ]; then
-              echo "| **ccache Hit Rate** | ${{ steps.build.outputs.ccache_hit_rate }} |" >> $GITHUB_STEP_SUMMARY
-            fi
             
             if [ -n "${{ steps.build.outputs.warnings_count }}" ]; then
               echo "| **Warnings** | ${{ steps.build.outputs.warnings_count }} |" >> $GITHUB_STEP_SUMMARY
@@ -360,8 +346,7 @@ jobs:
           
           ## 🔗 Links
           - [SUSFS Module](https://github.com/sidex15/ksu_module_susfs)
-          - [SukiSU Manager](https://github.com/SukiSU-Ultra/SukiSU-Ultra)
-          - [Report Issues](https://github.com/${{ github.repository }}/issues)
+          - [SukiSU Manager](https://github.com/SukiSU-Ultra/SukiSU-Ultra)          
           
           ## 📊 Build Info
           - **Built on:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
