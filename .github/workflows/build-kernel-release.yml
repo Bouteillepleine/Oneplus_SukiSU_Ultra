@@ -90,35 +90,80 @@ jobs:
         with:
           sparse-checkout: configs/
 
-      - name: 🔍 Generate build matrix
+      - name: Generate Build Matrix
         id: matrix
+        shell: bash
         run: |
           set -euo pipefail
           echo "::group::Matrix Generation"
           
           echo "📋 Validating configs directory..."
-          [ -d configs ] || { echo "::error::configs/ directory not found"; exit 1; }
+          if [ ! -d "configs" ]; then
+            echo "::error::configs/ directory not found"
+            exit 1
+          fi
           
           echo "🔎 Scanning JSON configuration files..."
+          
           tmp=()
           config_count=0
+          validation_errors=0
+          
+          shopt -s nullglob
           for f in configs/*.json; do
             if [ -f "$f" ]; then
               echo "  → Validating: $(basename "$f")"
-              if jq empty "$f" 2>/dev/null; then
-                tmp+=("$(jq -c '.' "$f")")
-                ((config_count++))
-              else
-                echo "  ⚠️ Invalid JSON: $f"
+              
+              # Check JSON syntax with detailed error output
+              if ! error_output=$(jq empty "$f" 2>&1); then
+                echo "    ❌ Invalid JSON syntax"
+                echo "    Error: $error_output"
+                echo ""
+                echo "    File content (first 20 lines):"
+                head -20 "$f" | sed 's/^/    /'
+                validation_errors=1
+                continue
               fi
+              
+              # Check required fields
+              missing_fields=()
+              for field in device codename arch defconfig; do
+                if ! jq -e ".$field" "$f" >/dev/null 2>&1; then
+                  missing_fields+=("$field")
+                fi
+              done
+              
+              if [ ${#missing_fields[@]} -gt 0 ]; then
+                echo "    ❌ Missing required fields: ${missing_fields[*]}"
+                validation_errors=1
+                continue
+              fi
+              
+              # Add to valid configs
+              tmp+=("$(jq -c '.' "$f")")
+              ((config_count++))
+              echo "    ✅ Valid"
             fi
           done
           
-          [ ${#tmp[@]} -gt 0 ] || { echo "::error::No valid configs found"; exit 1; }
+          echo ""
+          
+          # Check if we found any configs
+          if [ ${#tmp[@]} -eq 0 ]; then
+            if [ $validation_errors -eq 1 ]; then
+              echo "::error::All configuration files have validation errors"
+            else
+              echo "::error::No JSON configuration files found in configs/"
+            fi
+            exit 1
+          fi
+          
           echo "✅ Found $config_count valid configuration(s)"
           
+          # Create matrix JSON
           printf '%s\n' "${tmp[@]}" | jq -s '.' > m.json
           
+          # Apply filter
           input="${{ inputs.op_model }}"
           echo ""
           echo "🎯 Filter criteria: $input"
@@ -132,17 +177,17 @@ jobs:
             filter="map(select(.android_version==\"$av\" and .kernel_version==\"$kv\"))"
             echo "  → Filtering by Android: $av, Kernel: $kv"
           else
-            filter="map(select(.model==\"$input\"))"
-            echo "  → Filtering by model: $input"
+            filter="map(select(.device==\"$input\"))"
+            echo "  → Filtering by device: $input"
           fi
           
           filtered=$(jq -c "$filter" m.json)
           filtered_count=$(jq 'length' <<<"$filtered")
           
-          [ "$filtered_count" -gt 0 ] || { 
+          if [ "$filtered_count" -eq 0 ]; then
             echo "::error::No configurations match filter: $input"
             exit 1
-          }
+          fi
           
           echo ""
           echo "📊 Matrix Statistics:"
@@ -152,7 +197,7 @@ jobs:
           
           echo ""
           echo "🏗️ Build targets:"
-          jq -r '.[] | "  → \(.model) (\(.android_version)-\(.kernel_version))"' <<<"$filtered"
+          jq -r '.[] | "  → \(.device) (\(.codename))"' <<<"$filtered"
           
           echo ""
           echo "matrix<<EOF" >> $GITHUB_OUTPUT
