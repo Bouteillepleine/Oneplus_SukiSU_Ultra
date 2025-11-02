@@ -1949,7 +1949,8 @@ runs:
           echo "- **Build Time:** ${BUILD_MIN}m ${BUILD_SEC}s" >> $GITHUB_STEP_SUMMARY
         fi
         
-        if [ -n "${{ steps.ccache_stats.outputs.hit_rate }}" ]; then
+        # ✅ KEEP ONLY THIS - single ccache reference in Build Statistics
+        if [ "${{ inputs.clean }}" != "true" ] && [ -n "${{ steps.ccache_stats.outputs.hit_rate }}" ]; then
           echo "- **ccache Hit Rate:** ${{ steps.ccache_stats.outputs.hit_rate }}" >> $GITHUB_STEP_SUMMARY
         fi
         
